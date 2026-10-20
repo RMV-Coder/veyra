@@ -9,16 +9,22 @@
 //! all be flattened into one, which lets status, diff, switch, reset and undo share the
 //! same comparison and application logic.
 
+pub mod annotate;
 pub mod checkout;
 pub mod commit;
 pub mod config;
 pub mod diff;
 pub mod flat;
+pub mod hooks;
 pub mod index;
 pub mod merge;
+pub mod patch;
+pub mod pick;
+pub mod push;
 pub mod refs;
 pub mod remote;
 pub mod repo;
+pub mod stash;
 pub mod time;
 pub mod worktree;
 

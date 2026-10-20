@@ -77,7 +77,7 @@ const KB: &[Entry] = &[
         risk: Risk::Safe,
         risk_note: "Can conflict if later commits touched the same lines.",
         recovery: "Revert the revert, or `git reset --hard HEAD~1` if not pushed.",
-        veyra: "Planned (Phase 2). Use `git revert` meanwhile; `veyra undo` can undo it.",
+        veyra: "`veyra revert <commit>`. If it conflicts, resolve, then `veyra revert --continue` (or `--abort`).",
     },
     Entry {
         pattern: &[&["restore"], &["--staged", "-S"]],
@@ -148,7 +148,7 @@ const KB: &[Entry] = &[
         risk: Risk::Destructive,
         risk_note: "Untracked files were never in Git; deleted files are gone.",
         recovery: "None. Always run `git clean -n` (dry run) first.",
-        veyra: "Not implemented yet. Veyra checkpoints include untracked files, so `veyra checkpoint` before cleaning makes it recoverable.",
+        veyra: "`veyra clean -f [-d]` checkpoints the files first, so `veyra undo` brings them back (ignored files are never touched).",
     },
     Entry {
         pattern: &[&["stash"], &["drop", "clear"]],
@@ -156,7 +156,7 @@ const KB: &[Entry] = &[
         risk: Risk::Destructive,
         risk_note: "Dropped stashes are only findable as dangling commits until gc.",
         recovery: "`git fsck --unreachable | grep commit`, then inspect candidates.",
-        veyra: "Stash is planned (Phase 2). Checkpoints are the safer alternative today.",
+        veyra: "`veyra stash drop` / `stash clear` (git-compatible refs/stash). `veyra op log` still records the dropped commit id.",
     },
     Entry {
         pattern: &[&["stash"], &["pop"]],
@@ -164,7 +164,7 @@ const KB: &[Entry] = &[
         risk: Risk::Caution,
         risk_note: "Conflicts leave the stash in place; a clean pop deletes it.",
         recovery: "The dropped stash's id is printed; `git stash apply <id>`.",
-        veyra: "Planned as `veyra unshelve` (Phase 2).",
+        veyra: "`veyra stash pop` / `veyra unshelve`; a conflicted pop keeps the entry.",
     },
     Entry {
         pattern: &[&["stash"]],
@@ -172,7 +172,7 @@ const KB: &[Entry] = &[
         risk: Risk::Safe,
         risk_note: "Untracked files are not stashed unless -u.",
         recovery: "`git stash pop`.",
-        veyra: "Planned as `veyra shelve` (Phase 2); `veyra checkpoint` covers the safety use case now.",
+        veyra: "`veyra stash` / `veyra shelve` (same refs/stash as git; `-u` includes untracked files).",
     },
     Entry {
         pattern: &[&["push"], &["--force", "-f"]],
@@ -180,7 +180,7 @@ const KB: &[Entry] = &[
         risk: Risk::Destructive,
         risk_note: "Teammates' commits on the remote can be silently discarded.",
         recovery: "Someone with the lost commits must push them again; check the remote's reflog/UI.",
-        veyra: "Prefer `--force-with-lease`. `veyra push` is planned (Phase 2) and will refuse plain --force by default.",
+        veyra: "`veyra push --force-with-lease` is the safe choice; plain `--force` needs --yes in agent mode.",
     },
     Entry {
         pattern: &[&["push"], &["--force-with-lease"]],
@@ -188,7 +188,7 @@ const KB: &[Entry] = &[
         risk: Risk::Caution,
         risk_note: "Safer than --force, but a recent fetch can make the lease stale.",
         recovery: "As with --force.",
-        veyra: "Planned (Phase 2).",
+        veyra: "`veyra push --force-with-lease` — refuses if the remote moved since your last fetch.",
     },
     Entry {
         pattern: &[&["push"]],
@@ -196,7 +196,7 @@ const KB: &[Entry] = &[
         risk: Risk::Safe,
         risk_note: "Published commits shouldn't be rewritten afterwards.",
         recovery: "`git revert` published mistakes.",
-        veyra: "Planned (Phase 2). `git push` works on Veyra repositories meanwhile.",
+        veyra: "`veyra push [-u] [--tags] [--delete]`; runs pre-push hooks; `veyra undo` refuses to silently unpublish pushed commits.",
     },
     Entry {
         pattern: &[&["pull"]],
@@ -222,7 +222,7 @@ const KB: &[Entry] = &[
         risk: Risk::Destructive,
         risk_note: "Rewrites history; dropped commits disappear from branches.",
         recovery: "`git rebase --abort` during; `git reflog` + `git reset --hard <old>` after.",
-        veyra: "Planned (Phase 2). `veyra undo` already reverts a finished `git rebase` (recorded as an external operation).",
+        veyra: "`veyra rebase -i <upstream>` (pick/reword/edit/squash/fixup/drop, reordering); `veyra undo` reverts any finished rebase.",
     },
     Entry {
         pattern: &[&["rebase"]],
@@ -230,7 +230,7 @@ const KB: &[Entry] = &[
         risk: Risk::Caution,
         risk_note: "Rewrites history; never rebase commits others have.",
         recovery: "`git rebase --abort`, or the reflog.",
-        veyra: "Planned (Phase 2); `veyra undo` reverts a finished git rebase.",
+        veyra: "`veyra rebase <upstream> [--onto X]`, `--continue/--skip/--abort`; `veyra undo` puts the branch back exactly.",
     },
     Entry {
         pattern: &[&["commit"], &["--amend"]],
@@ -254,7 +254,7 @@ const KB: &[Entry] = &[
         risk: Risk::Caution,
         risk_note: "Can conflict; duplicates commits across branches.",
         recovery: "`git cherry-pick --abort`.",
-        veyra: "Planned (Phase 2).",
+        veyra: "`veyra cherry-pick [-x] [-n] <commits>`, keeps the original author; `--continue/--abort` on conflicts.",
     },
     Entry {
         pattern: &[&["merge"], &["--abort"]],
@@ -345,7 +345,7 @@ const KB: &[Entry] = &[
         risk: Risk::Safe,
         risk_note: "—",
         recovery: "`git restore --staged`.",
-        veyra: "Planned (Phase 2).",
+        veyra: "`veyra add -p` (y/n/q/a/d per hunk); `veyra undo` unstages again.",
     },
     Entry {
         pattern: &[&["add"]],

@@ -58,6 +58,9 @@ pub enum Command {
         /// Allow adding ignored files.
         #[arg(short, long)]
         force: bool,
+        /// Choose hunks to stage interactively.
+        #[arg(short, long)]
+        patch: bool,
     },
     /// Remove files from the index and the working tree.
     #[command(visible_alias = "remove")]
@@ -106,6 +109,16 @@ pub enum Command {
     },
     /// Show changes between the worktree, index and commits.
     Diff(DiffArgs),
+    /// Show who last changed each line of a file.
+    Blame {
+        file: String,
+        /// Blame as of this revision (default: HEAD).
+        #[arg(long)]
+        rev: Option<String>,
+        /// Only lines in this range, e.g. -L 10,20.
+        #[arg(short = 'L', value_name = "start,end")]
+        lines: Option<String>,
+    },
 
     // ----- branches -----
     /// List, create, delete or rename branches.
@@ -165,6 +178,28 @@ pub enum Command {
     },
     /// Create, list or delete tags.
     Tag(TagArgs),
+    /// Apply the changes of existing commits onto the current branch.
+    #[command(name = "cherry-pick")]
+    CherryPick(SequenceArgs),
+    /// Create commits that reverse existing commits (safe on shared branches).
+    Revert(SequenceArgs),
+    /// Replay the current branch's commits on top of another base.
+    Rebase {
+        /// Commits not in <upstream> are replayed (default: the branch's upstream).
+        upstream: Option<String>,
+        /// Replay onto this commit instead of <upstream>.
+        #[arg(long)]
+        onto: Option<String>,
+        /// Edit the list of commits first: reorder, reword, edit, squash, fixup or drop them.
+        #[arg(short, long)]
+        interactive: bool,
+        #[arg(long = "continue", group = "seq")]
+        continue_: bool,
+        #[arg(long, group = "seq")]
+        skip: bool,
+        #[arg(long, group = "seq")]
+        abort: bool,
+    },
 
     // ----- remotes -----
     /// Manage remotes.
@@ -178,10 +213,13 @@ pub enum Command {
         #[arg(long)]
         ff_only: bool,
     },
-    /// Update remote refs (not implemented yet — use `git push`).
-    Push {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+    /// Update remote refs along with associated objects.
+    Push(PushArgs),
+    /// Fetch, then fast-forward or rebase the current branch onto its upstream (push only with --push).
+    Sync {
+        /// Also push the result.
+        #[arg(long)]
+        push: bool,
     },
 
     // ----- safety net -----
@@ -204,6 +242,31 @@ pub enum Command {
         #[arg(short, long)]
         force: bool,
     },
+    /// Remove untracked files (checkpointed first, so `veyra undo` brings them back).
+    Clean {
+        /// Required unless --dry-run (like git's clean.requireForce).
+        #[arg(short, long)]
+        force: bool,
+        /// Only show what would be removed.
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+        /// Also remove files in untracked directories.
+        #[arg(short)]
+        d: bool,
+        /// Limit to these paths.
+        paths: Vec<String>,
+    },
+    /// Set local changes aside (git-compatible refs/stash) and restore them later.
+    Stash(StashArgs),
+    /// Stash local changes (alias for `stash push`).
+    Shelve {
+        #[arg(short, long)]
+        message: Option<String>,
+        #[arg(short = 'u', long)]
+        include_untracked: bool,
+    },
+    /// Re-apply and drop the latest stash (alias for `stash pop`).
+    Unshelve { entry: Option<String> },
     /// Inspect and restore the operation log.
     #[command(name = "op", alias = "operation")]
     Op(OpArgs),
@@ -321,6 +384,9 @@ pub struct LogArgs {
     /// Start from all refs.
     #[arg(long)]
     pub all: bool,
+    /// Draw the history as a graph.
+    #[arg(long)]
+    pub graph: bool,
     /// Show only commits with this trailer, e.g. --trailer Intent=int-8a92c1.
     #[arg(long, value_name = "key=value")]
     pub trailer: Option<String>,
@@ -388,6 +454,19 @@ pub enum BranchCommand {
     },
     /// Rename a branch.
     Rename { old: String, new: String },
+    /// Delete local branches that are fully merged into the default branch (undoable).
+    Cleanup {
+        /// Only list what would be deleted.
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+    },
+    /// Compare two branches: commits ahead/behind and files that differ.
+    Compare {
+        /// The branch to compare.
+        branch: String,
+        /// The branch to compare against (default: the current branch).
+        base: Option<String>,
+    },
     /// Branches with no commits for a while, and whether they are merged.
     Stale {
         #[arg(long, default_value_t = 90)]
@@ -619,4 +698,107 @@ pub struct ConfigArgs {
     pub unset: bool,
     #[arg(short, long)]
     pub list: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct PushArgs {
+    /// Remote name (default: the branch's push remote, then `origin`).
+    pub remote: Option<String>,
+    /// Refspecs: `main`, `main:release`, `+main`, `:old` (delete). Default: the current branch.
+    pub refspecs: Vec<String>,
+    /// Allow non-fast-forward updates (prefer --force-with-lease).
+    #[arg(short, long)]
+    pub force: bool,
+    /// Overwrite only if the remote still has what we last fetched.
+    #[arg(long)]
+    pub force_with_lease: bool,
+    /// Remember the remote branch as upstream (`branch.<name>.remote/merge`).
+    #[arg(short = 'u', long)]
+    pub set_upstream: bool,
+    /// Also push all tags.
+    #[arg(long)]
+    pub tags: bool,
+    /// Delete the named remote refs.
+    #[arg(short, long)]
+    pub delete: bool,
+    /// Show what would be pushed without sending anything.
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
+    /// Skip the pre-push hook.
+    #[arg(long)]
+    pub no_verify: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct SequenceArgs {
+    /// Commits to apply, in order.
+    pub commits: Vec<String>,
+    /// Apply to index and worktree without committing.
+    #[arg(short = 'n', long)]
+    pub no_commit: bool,
+    /// Append "(cherry picked from commit …)" to the message.
+    #[arg(short = 'x')]
+    pub record_origin: bool,
+    /// Parent number of the mainline when replaying a merge commit.
+    #[arg(short = 'm', long)]
+    pub mainline: Option<usize>,
+    /// Commit the resolved conflict and go on.
+    #[arg(long = "continue", group = "seq")]
+    pub continue_: bool,
+    /// Give up and return to the state before.
+    #[arg(long, group = "seq")]
+    pub abort: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct StashArgs {
+    #[command(subcommand)]
+    pub command: Option<StashCommand>,
+    /// Message for the new entry (bare `veyra stash` = push).
+    #[arg(short, long)]
+    pub message: Option<String>,
+    #[arg(short = 'u', long)]
+    pub include_untracked: bool,
+    #[arg(long)]
+    pub keep_index: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum StashCommand {
+    /// Save local changes and reset them away.
+    Push {
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Also stash untracked files.
+        #[arg(short = 'u', long)]
+        include_untracked: bool,
+        /// Keep staged changes in the index.
+        #[arg(long)]
+        keep_index: bool,
+    },
+    /// List entries, newest first.
+    List,
+    /// Show the changes in an entry.
+    Show {
+        entry: Option<String>,
+        #[arg(short, long)]
+        patch: bool,
+    },
+    /// Apply an entry and keep it.
+    Apply {
+        entry: Option<String>,
+        #[arg(long)]
+        index: bool,
+    },
+    /// Apply an entry and drop it if it applied cleanly.
+    Pop {
+        entry: Option<String>,
+        #[arg(long)]
+        index: bool,
+    },
+    /// Delete an entry.
+    Drop { entry: Option<String> },
+    /// Delete all entries.
+    Clear,
 }

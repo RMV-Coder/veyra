@@ -119,6 +119,21 @@ pub fn status(ctx: &Ctx, short: bool) -> Result<()> {
             "You are merging {}.\n  (fix conflicts, `veyra add` them, then `veyra commit`; or `veyra merge --abort`)",
             veyra_core::short(&m)
         );
+    } else if let Some(state) = repo.rebase_in_progress()? {
+        let current = state.current.map(|c| veyra_core::short(&c.commit)).unwrap_or_default();
+        anstream::println!(
+            "You are rebasing onto {} (stopped at {current}, {} left).
+  (fix conflicts, `veyra add` them, then `veyra rebase --continue`; or `--skip` / `--abort`)",
+            veyra_core::short(&state.onto),
+            plural(state.todo.len(), "commit")
+        );
+    } else if let Some((kind, commit)) = repo.pick_in_progress()? {
+        let name = if kind == veyra_core::pick::PickKind::CherryPick { "cherry-pick" } else { "revert" };
+        anstream::println!(
+            "You are in the middle of a {name} of {}.
+  (fix conflicts, `veyra add` them, then `veyra {name} --continue`; or `veyra {name} --abort`)",
+            veyra_core::short(&commit)
+        );
     } else if let Some(state) = repo.in_progress() {
         anstream::println!("A git operation is in progress: {state}");
     }
@@ -289,39 +304,26 @@ fn commit_message(repo: &Repo, args: &CommitArgs, merging: bool) -> Result<Strin
 
 fn edit_message(repo: &Repo, template: &str) -> Result<String> {
     let path = repo.git_dir().join("COMMIT_EDITMSG");
-    let mut text = String::from(template);
-    if !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push_str("\n# Please enter the commit message for your changes. Lines starting\n# with '#' will be ignored, and an empty message aborts the commit.\n");
-    std::fs::write(&path, &text)?;
-    let editor = std::env::var("GIT_EDITOR")
-        .ok()
-        .or_else(|| repo.config_get("core.editor"))
-        .or_else(|| std::env::var("VISUAL").ok())
-        .or_else(|| std::env::var("EDITOR").ok())
-        .unwrap_or_else(|| if cfg!(windows) { "notepad".into() } else { "vi".into() });
-    let quoted = format!("\"{}\"", path.display());
-    let status = if cfg!(windows) {
-        std::process::Command::new("cmd").args(["/C", &format!("{editor} {quoted}")]).status()
-    } else {
-        std::process::Command::new("sh").args(["-c", &format!("{editor} {quoted}")]).status()
-    }
-    .with_context(|| {
-        format!("could not start the editor '{editor}'\n  hint: pass -m \"message\" or set core.editor")
-    })?;
-    if !status.success() {
-        bail!("the editor '{editor}' exited with an error; aborting commit");
-    }
-    Ok(std::fs::read_to_string(&path)?)
+    crate::editor::edit_text(
+        &crate::editor::commit_editor(repo),
+        &path,
+        template,
+        "\n# Please enter the commit message for your changes. Lines starting\n# with '#' will be ignored, and an empty message aborts the commit.\n",
+    )
+}
+
+/// Message editor for `rebase` reword/squash steps.
+pub(crate) fn rebase_message_editor(repo: &Repo) -> impl FnMut(&str) -> Result<String> + '_ {
+    move |template: &str| edit_message(repo, template)
 }
 
 pub fn commit(ctx: &Ctx, args: CommitArgs) -> Result<()> {
     let repo = ctx.repo()?;
     repo.require_identity()?;
-    let merging = repo.merge_head()?.is_some();
+    let picking = repo.pick_in_progress()?.is_some();
+    let merging = repo.merge_head()?.is_some() || picking;
     if merging && args.amend {
-        bail!("you are in the middle of a merge; cannot amend");
+        bail!("you are in the middle of a merge, cherry-pick or revert; cannot amend");
     }
 
     // Trailers: provenance and intent links (declared, never inferred).
@@ -343,31 +345,85 @@ pub fn commit(ctx: &Ctx, args: CommitArgs) -> Result<()> {
         trailers.push(("Intent".into(), found.1.id.clone()));
     }
 
-    let message = commit_message(&repo, &args, merging)?;
-    if message.trim().is_empty() {
-        bail!("aborting commit due to empty commit message");
-    }
-
     for caveat in repo.commit_caveats() {
         ui::warn(&caveat);
     }
 
     let log = veyra_ops::OpLog::open(&repo)?;
     let tx = log.begin(if args.amend { "amend" } else { "commit" }, &ctx.argv, false)?;
-    if args.all {
-        repo.add_tracked()?;
-    }
-    if !args.no_verify {
-        super::tools::pre_commit_checks(&repo, args.allow_secrets)?;
-    }
-    let request = CommitRequest { message, amend: args.amend, allow_empty: args.allow_empty, trailers };
+    let original_index = tx.before.view.index_tree_id()?;
+    // Like git's temporary index for `commit -a`: if anything below fails, the index is put back.
+    let restore_index = |repo: &veyra_core::Repo| -> Result<()> {
+        let flat = repo.flat_from_tree(original_index)?;
+        repo.write_index_from_flat(&flat, &Default::default())
+    };
+    let prepared = (|| -> Result<String> {
+        if args.all {
+            repo.add_tracked()?;
+        }
+        if !args.no_verify {
+            repo.run_hook("pre-commit", &[], None)?;
+            super::tools::pre_commit_checks(&repo, args.allow_secrets)?;
+        }
+        let message = commit_message(&repo, &args, merging)?;
+        // prepare-commit-msg and commit-msg may rewrite the message file, like in git.
+        let msg_file = repo.git_dir().join("COMMIT_EDITMSG");
+        std::fs::write(&msg_file, &message)?;
+        let msg_path = msg_file.to_string_lossy().into_owned();
+        let source = if !args.message.is_empty() || args.file.is_some() {
+            "message"
+        } else if merging {
+            "merge"
+        } else if args.amend {
+            "commit"
+        } else {
+            "template"
+        };
+        let mut hook_args = vec![msg_path.as_str(), source];
+        let head_hex = repo.head_commit_id()?.map(|h| h.to_string());
+        if args.amend
+            && let Some(h) = &head_hex
+        {
+            hook_args.push(h.as_str());
+        }
+        repo.run_hook("prepare-commit-msg", &hook_args, None)?;
+        if !args.no_verify {
+            repo.run_hook("commit-msg", &[msg_path.as_str()], None)?;
+        }
+        let from_editor = args.message.is_empty() && args.file.is_none() && !args.no_edit;
+        let message = veyra_core::commit::clean_message(&std::fs::read_to_string(&msg_file)?, from_editor);
+        if message.trim().is_empty() {
+            bail!("aborting commit due to empty commit message");
+        }
+        Ok(message)
+    })();
+    let message = match prepared {
+        Ok(m) => m,
+        Err(err) => {
+            if args.all {
+                let _ = restore_index(&repo);
+            }
+            return Err(err);
+        }
+    };
+    let request = CommitRequest { message, amend: args.amend, allow_empty: args.allow_empty, trailers, author: None };
     let parent_tree = repo.head_tree_id()?;
-    let id = if merging { repo.commit_merge(&request)? } else { repo.commit(&request)? };
+    let id = if picking {
+        // Finishing a stopped cherry-pick/revert keeps the original author, like git.
+        repo.continue_pick(Some(veyra_core::commit::add_trailers(&request.message, &request.trailers)))?
+    } else if merging {
+        repo.commit_merge(&request)?
+    } else {
+        repo.commit(&request)?
+    };
     let info = repo.commit_info(id)?;
     let changes = veyra_core::flat::diff(&repo.flat_from_tree(parent_tree)?, &repo.flat_from_tree(info.tree)?);
     let summary =
         format!("{} {} {}", if args.amend { "amend" } else { "commit" }, veyra_core::short(&id), info.summary());
     tx.commit(&summary)?;
+    if let Some(err) = repo.run_post_hook("post-commit", &[]) {
+        ui::warn(&err);
+    }
 
     let branch = repo.head_label()?;
     let root = if info.parents.is_empty() { " (root-commit)" } else { "" };
@@ -382,5 +438,129 @@ pub fn commit(ctx: &Ctx, args: CommitArgs) -> Result<()> {
         line.push_str(&format!(", {deleted} deleted"));
     }
     anstream::println!("{line}");
+    Ok(())
+}
+
+pub fn clean(ctx: &Ctx, force: bool, dry_run: bool, dirs: bool, paths: Vec<String>) -> Result<()> {
+    let repo = ctx.repo()?;
+    if !force && !dry_run && repo.config_bool("clean.requireForce").unwrap_or(true) {
+        bail!(
+            "refusing to clean without -f or -n (clean.requireForce)\n  hint: `veyra clean -n` shows what would go; removed files are checkpointed, so `veyra undo` restores them"
+        );
+    }
+    let spec = pathspec(ctx, &repo, &paths)?;
+    let removed = if dry_run {
+        repo.clean(&spec, dirs, true)?
+    } else {
+        ctx.confirm_destructive("clean")?;
+        journal(ctx, &repo, "clean", true, || {
+            let removed = repo.clean(&spec, dirs, false)?;
+            let n = removed.len();
+            Ok((removed, format!("clean {}", plural(n, "untracked file"))))
+        })?
+    };
+    for p in &removed {
+        anstream::println!("{} {p}", if dry_run { "Would remove" } else { "Removing" });
+    }
+    if !dry_run && !removed.is_empty() {
+        ui::hint("the files were checkpointed first; `veyra undo` brings them back");
+    }
+    Ok(())
+}
+
+/// `veyra add -p`: review each hunk and stage the ones you want.
+pub fn add_patch(ctx: &Ctx, paths: Vec<String>) -> Result<()> {
+    use std::io::{BufRead, Write};
+    use veyra_core::patch::FilePatch;
+
+    let repo = ctx.repo()?;
+    let spec = pathspec(ctx, &repo, &paths)?;
+    let candidates = repo.patch_candidates(&spec)?;
+    if candidates.is_empty() {
+        anstream::println!("No changes.");
+        return Ok(());
+    }
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines();
+    let mut ask = |prompt: &str| -> String {
+        anstream::print!("{}", ui::cyan(prompt));
+        let _ = std::io::stdout().flush();
+        match lines.next() {
+            Some(Ok(l)) => l.trim().to_lowercase(),
+            _ => "q".into(), // end of input = quit, keeping what was chosen
+        }
+    };
+    const HELP: &str = "y - stage this hunk\nn - do not stage this hunk\nq - quit; do not stage this hunk or any remaining ones\na - stage this hunk and all later hunks in the file\nd - do not stage this hunk or any later hunks in the file\n? - print help\n(splitting and editing hunks are not supported yet)\n";
+
+    let staged = journal(ctx, &repo, "add", false, || {
+        let mut staged = 0usize;
+        'files: for candidate in &candidates {
+            let path = candidate.path().to_string();
+            match candidate {
+                FilePatch::Deletion { path: p } => loop {
+                    anstream::println!("{}", ui::bold(&format!("deleted file: {path}")));
+                    match ask("Stage deletion [y,n,q,?]? ").as_str() {
+                        "y" => {
+                            repo.stage_deletion(p)?;
+                            staged += 1;
+                            break;
+                        }
+                        "n" | "d" => break,
+                        "q" => break 'files,
+                        _ => anstream::print!("{HELP}"),
+                    }
+                },
+                FilePatch::Whole { path: p } => loop {
+                    anstream::println!("{}", ui::bold(&format!("{path}: binary or mode change")));
+                    match ask("Stage the whole file [y,n,q,?]? ").as_str() {
+                        "y" => {
+                            repo.stage_whole(p)?;
+                            staged += 1;
+                            break;
+                        }
+                        "n" | "d" => break,
+                        "q" => break 'files,
+                        _ => anstream::print!("{HELP}"),
+                    }
+                },
+                FilePatch::Text { path: p, index, worktree, hunks } => {
+                    let mut accepted = vec![false; hunks.len()];
+                    let mut quit = false;
+                    let mut i = 0;
+                    while i < hunks.len() {
+                        anstream::println!("{}", ui::bold(&format!("diff --git a/{path} b/{path}")));
+                        anstream::print!("{}", ui::colour_diff(&hunks[i].text));
+                        match ask(&format!("({}/{}) Stage this hunk [y,n,q,a,d,?]? ", i + 1, hunks.len())).as_str() {
+                            "y" => {
+                                accepted[i] = true;
+                                i += 1;
+                            }
+                            "n" => i += 1,
+                            "a" => {
+                                accepted[i..].iter_mut().for_each(|a| *a = true);
+                                break;
+                            }
+                            "d" => break,
+                            "q" => {
+                                quit = true;
+                                break;
+                            }
+                            _ => anstream::print!("{HELP}"),
+                        }
+                    }
+                    if accepted.iter().any(|a| *a) {
+                        let content = veyra_core::patch::apply(index, worktree, &accepted);
+                        repo.stage_content(p, content.as_bytes())?;
+                        staged += accepted.iter().filter(|a| **a).count();
+                    }
+                    if quit {
+                        break 'files;
+                    }
+                }
+            }
+        }
+        Ok((staged, format!("stage {} interactively", plural(staged, "hunk"))))
+    })?;
+    anstream::println!("Staged {}.", plural(staged, "hunk"));
     Ok(())
 }

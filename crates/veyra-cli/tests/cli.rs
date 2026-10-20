@@ -473,3 +473,550 @@ fn op_log_lists_operations_newest_first() {
     let kinds: Vec<&str> = ops.as_array().unwrap().iter().map(|o| o["kind"].as_str().unwrap()).collect();
     assert_eq!(kinds, vec!["commit", "add"]);
 }
+
+/// A bare repository next to `env.repo`, registered as `origin`.
+fn bare_origin(env: &Env) -> PathBuf {
+    let bare = env.home.join("origin.git");
+    let mut cmd = Command::new("git");
+    env.apply(&mut cmd);
+    assert!(cmd.args(["init", "--bare", "-b", "main"]).arg(&bare).output().unwrap().status.success());
+    env.ok(&["remote", "add", "origin", bare.to_str().unwrap()]);
+    bare
+}
+
+fn git_in(env: &Env, dir: &std::path::Path, args: &[&str]) -> String {
+    let mut cmd = Command::new("git");
+    env.apply(&mut cmd);
+    let out = cmd.current_dir(dir).args(args).output().unwrap();
+    assert!(out.status.success(), "git {args:?} in {}: {}", dir.display(), String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn push_creates_and_fast_forwards_branches_on_a_bare_remote() {
+    require_git!();
+    let env = Env::new();
+    let bare = bare_origin(&env);
+    env.commit_file("a.txt", "one\n", "c1");
+    env.commit_file("src/b.rs", "fn b() {}\n", "c2");
+
+    let out = env.ok(&["push", "-u"]);
+    assert!(out.contains("[new branch]"), "{out}");
+    assert!(out.contains("set up to track 'origin/main'"), "{out}");
+    assert_eq!(git_in(&env, &bare, &["log", "--format=%s", "main"]), "c2\nc1\n");
+    git_in(&env, &bare, &["fsck", "--strict", "--no-dangling"]);
+    assert_eq!(env.git(&["rev-parse", "origin/main"]), env.git(&["rev-parse", "main"]), "remote-tracking ref updated");
+    assert_eq!(env.git(&["config", "branch.main.remote"]).trim(), "origin");
+
+    env.commit_file("a.txt", "two\n", "c3");
+    let out = env.ok(&["push"]);
+    assert!(out.contains(".."), "fast-forward shows old..new: {out}");
+    assert_eq!(git_in(&env, &bare, &["log", "-1", "--format=%s", "main"]).trim(), "c3");
+    git_in(&env, &bare, &["fsck", "--strict", "--no-dangling"]);
+    assert!(env.ok(&["push"]).contains("[up to date]"));
+}
+
+#[test]
+fn push_rejects_non_fast_forward_unless_leased_or_forced() {
+    require_git!();
+    let env = Env::new();
+    let bare = bare_origin(&env);
+    env.commit_file("a.txt", "one\n", "c1");
+    env.ok(&["push", "-u"]);
+    // Someone else pushes c2 to the remote.
+    let other = env.home.join("other");
+    git_in(&env, &env.home, &["clone", "-q", bare.to_str().unwrap(), other.to_str().unwrap()]);
+    std::fs::write(other.join("a.txt"), "theirs\n").unwrap();
+    git_in(&env, &other, &["commit", "-qam", "their change"]);
+    git_in(&env, &other, &["push", "-q", "origin", "main"]);
+    // We rewrite our history locally.
+    env.ok(&["commit", "--amend", "-m", "c1 amended"]);
+
+    env.veyra(&["push"]).assert().failure().stdout(predicate::str::contains("[rejected]"));
+    // Lease is stale: we never fetched their commit.
+    env.veyra(&["push", "--force-with-lease"]).assert().failure().stdout(predicate::str::contains("stale info"));
+    assert_eq!(git_in(&env, &bare, &["log", "-1", "--format=%s", "main"]).trim(), "their change");
+
+    env.ok(&["fetch"]);
+    let out = env.ok(&["push", "--force-with-lease"]);
+    assert!(out.contains("forced update"), "{out}");
+    assert_eq!(git_in(&env, &bare, &["log", "--format=%s", "main"]), "c1 amended\n");
+}
+
+#[test]
+fn push_tags_and_delete_branches() {
+    require_git!();
+    let env = Env::new();
+    let bare = bare_origin(&env);
+    env.commit_file("a.txt", "one\n", "c1");
+    env.ok(&["tag", "-a", "v1.0.0", "-m", "first release"]);
+    env.ok(&["branch", "topic"]);
+    env.ok(&["push", "origin", "main", "topic", "--tags"]);
+    assert_eq!(git_in(&env, &bare, &["tag"]), "v1.0.0\n");
+    assert_eq!(git_in(&env, &bare, &["cat-file", "-t", "v1.0.0"]).trim(), "tag", "annotated tag object was sent");
+    assert!(git_in(&env, &bare, &["branch"]).contains("topic"));
+
+    env.ok(&["push", "origin", "--delete", "topic"]);
+    assert!(!git_in(&env, &bare, &["branch"]).contains("topic"));
+    git_in(&env, &bare, &["fsck", "--strict", "--no-dangling"]);
+}
+
+#[test]
+fn undo_refuses_to_silently_unpublish_pushed_commits() {
+    require_git!();
+    let env = Env::new();
+    bare_origin(&env);
+    env.commit_file("a.txt", "one\n", "c1");
+    env.commit_file("a.txt", "two\n", "c2");
+    env.ok(&["push", "-u"]);
+    env.veyra(&["undo"]).assert().failure().stderr(predicate::str::contains("already pushed"));
+    assert_eq!(env.git(&["log", "-1", "--format=%s"]).trim(), "c2");
+    env.ok(&["undo", "--force"]);
+    assert_eq!(env.git(&["log", "-1", "--format=%s"]).trim(), "c1");
+}
+
+#[test]
+fn agent_mode_requires_yes_for_force_push() {
+    require_git!();
+    let env = Env::new();
+    bare_origin(&env);
+    env.commit_file("a.txt", "one\n", "c1");
+    env.veyra(&["push", "--force"])
+        .env("VEYRA_AGENT", "1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--yes"));
+}
+
+#[test]
+fn cherry_pick_keeps_the_author_and_revert_reverses() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "base\n", "base");
+    env.ok(&["switch", "-c", "feature"]);
+    env.write("feature.txt", "feature\n");
+    env.ok(&["add", "feature.txt"]);
+    env.veyra(&["commit", "-m", "feature work"])
+        .env("GIT_AUTHOR_NAME", "Original Author")
+        .env("GIT_AUTHOR_EMAIL", "orig@example.com")
+        .assert()
+        .success();
+    env.ok(&["switch", "main"]);
+    env.commit_file("main.txt", "main\n", "main work");
+
+    env.ok(&["cherry-pick", "-x", "feature"]);
+    assert_eq!(env.read("feature.txt").as_deref(), Some("feature\n"));
+    let log = env.git(&["log", "-1", "--format=%an|%s|%b"]);
+    assert!(log.starts_with("Original Author|feature work|"), "{log}");
+    assert!(log.contains("cherry picked from commit"), "{log}");
+    env.assert_git_clean_and_valid();
+
+    env.ok(&["revert", "HEAD"]);
+    assert_eq!(env.read("feature.txt"), None);
+    assert!(env.git(&["log", "-1", "--format=%s"]).starts_with("Revert \"feature work\""));
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn conflicted_cherry_pick_continue_and_abort() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "base\n", "base");
+    env.ok(&["switch", "-c", "feature"]);
+    env.commit_file("a.txt", "feature\n", "feature edit");
+    env.ok(&["switch", "main"]);
+    env.commit_file("a.txt", "main\n", "main edit");
+
+    env.veyra(&["cherry-pick", "feature"]).assert().failure().stdout(predicate::str::contains("CONFLICT"));
+    assert!(env.git(&["status"]).contains("cherry-pick"), "git sees the cherry-pick in progress");
+    assert!(env.ok(&["status"]).contains("middle of a cherry-pick"));
+    env.ok(&["cherry-pick", "--abort"]);
+    assert_eq!(env.read("a.txt").as_deref(), Some("main\n"));
+    env.assert_git_clean_and_valid();
+
+    env.veyra(&["cherry-pick", "feature"]).assert().failure();
+    env.write("a.txt", "resolved\n");
+    env.ok(&["add", "a.txt"]);
+    env.ok(&["cherry-pick", "--continue"]);
+    assert_eq!(env.git(&["log", "-1", "--format=%s"]).trim(), "feature edit");
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn rebase_replays_commits_and_undo_restores_the_branch() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "base\n", "base");
+    env.ok(&["switch", "-c", "topic"]);
+    env.commit_file("t1.txt", "1\n", "topic 1");
+    env.commit_file("t2.txt", "2\n", "topic 2");
+    let before = env.git(&["rev-parse", "topic"]);
+    env.ok(&["switch", "main"]);
+    env.commit_file("m.txt", "m\n", "main moved");
+    env.ok(&["switch", "topic"]);
+
+    let out = env.ok(&["rebase", "main"]);
+    assert!(out.contains("Successfully rebased"), "{out}");
+    assert_eq!(env.git(&["log", "--format=%s"]), "topic 2\ntopic 1\nmain moved\nbase\n");
+    assert_eq!(env.git(&["branch", "--show-current"]).trim(), "topic");
+    env.assert_git_clean_and_valid();
+    assert!(env.ok(&["rebase", "main"]).contains("up to date"));
+
+    env.ok(&["undo"]);
+    assert_eq!(env.git(&["rev-parse", "topic"]), before, "undo restores the pre-rebase branch");
+}
+
+#[test]
+fn rebase_stops_on_conflict_and_can_continue_or_abort() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "base\n", "base");
+    env.ok(&["switch", "-c", "topic"]);
+    env.commit_file("a.txt", "topic\n", "topic edit");
+    env.commit_file("b.txt", "b\n", "topic adds b");
+    env.ok(&["switch", "main"]);
+    env.commit_file("a.txt", "main\n", "main edit");
+    env.ok(&["switch", "topic"]);
+    let before = env.git(&["rev-parse", "topic"]);
+
+    env.veyra(&["rebase", "main"]).assert().failure().stdout(predicate::str::contains("Could not apply"));
+    assert!(env.ok(&["status"]).contains("rebasing"));
+    env.ok(&["rebase", "--abort"]);
+    assert_eq!(env.git(&["rev-parse", "topic"]), before);
+    assert_eq!(env.git(&["branch", "--show-current"]).trim(), "topic");
+    assert_eq!(env.read("a.txt").as_deref(), Some("topic\n"));
+    env.assert_git_clean_and_valid();
+
+    env.veyra(&["rebase", "main"]).assert().failure();
+    env.write("a.txt", "merged\n");
+    env.ok(&["add", "a.txt"]);
+    env.ok(&["rebase", "--continue"]);
+    assert_eq!(env.git(&["log", "--format=%s"]), "topic adds b\ntopic edit\nmain edit\nbase\n");
+    assert_eq!(env.read("a.txt").as_deref(), Some("merged\n"));
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn stash_round_trips_and_interoperates_with_git_stash() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "base\n", "base");
+    env.write("a.txt", "work in progress\n");
+    env.write("new.txt", "staged new file\n");
+    env.ok(&["add", "new.txt"]);
+
+    let out = env.ok(&["stash", "-m", "half-done feature"]);
+    assert!(out.contains("Saved working directory"), "{out}");
+    assert_eq!(env.read("a.txt").as_deref(), Some("base\n"));
+    assert_eq!(env.read("new.txt"), None);
+    env.assert_git_clean_and_valid();
+    assert_eq!(env.git(&["stash", "list"]).trim(), "stash@{0}: On main: half-done feature", "git sees veyra's stash");
+
+    env.ok(&["stash", "pop"]);
+    assert_eq!(env.read("a.txt").as_deref(), Some("work in progress\n"));
+    assert_eq!(env.read("new.txt").as_deref(), Some("staged new file\n"));
+    assert_eq!(
+        env.git(&["status", "--porcelain"]),
+        " M a.txt\nA  new.txt\n",
+        "new files come back staged, edits unstaged"
+    );
+    assert_eq!(env.git(&["stash", "list"]), "");
+
+    // A stash made by git, popped by veyra.
+    env.git(&["stash", "push", "-m", "from git"]);
+    assert!(env.ok(&["stash", "list"]).contains("from git"));
+    env.ok(&["unshelve"]);
+    assert_eq!(env.read("a.txt").as_deref(), Some("work in progress\n"));
+}
+
+#[test]
+fn stash_untracked_files_and_drop_keeps_git_in_sync() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "base\n", "base");
+    env.write("scratch.txt", "untracked\n");
+    env.ok(&["stash", "push", "-u", "-m", "first"]);
+    assert_eq!(env.read("scratch.txt"), None);
+    env.write("a.txt", "second change\n");
+    env.ok(&["shelve", "-m", "second"]);
+    assert_eq!(env.git(&["stash", "list"]), "stash@{0}: On main: second\nstash@{1}: On main: first\n");
+
+    env.ok(&["stash", "drop", "stash@{0}"]);
+    assert_eq!(env.git(&["stash", "list"]), "stash@{0}: On main: first\n");
+    env.ok(&["stash", "apply"]);
+    assert_eq!(env.read("scratch.txt").as_deref(), Some("untracked\n"));
+    assert_eq!(env.git(&["stash", "list"]).lines().count(), 1, "apply keeps the entry");
+    std::fs::remove_file(env.repo.join("scratch.txt")).unwrap();
+    env.ok(&["stash", "clear"]);
+    assert_eq!(env.git(&["stash", "list"]), "");
+    env.git(&["fsck", "--strict"]);
+}
+
+#[test]
+fn stash_pop_with_conflicts_keeps_the_entry() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "base\n", "base");
+    env.write("a.txt", "stashed\n");
+    env.ok(&["stash"]);
+    env.commit_file("a.txt", "committed meanwhile\n", "c2");
+    env.veyra(&["stash", "pop"]).assert().failure().stdout(predicate::str::contains("CONFLICT"));
+    assert_eq!(env.git(&["stash", "list"]).lines().count(), 1);
+    assert!(env.read("a.txt").unwrap().contains("<<<<<<<"));
+}
+
+fn install_hook(env: &Env, name: &str, body: &str) {
+    let path = env.repo.join(".git").join("hooks").join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[test]
+fn commit_hooks_run_like_git() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "a\n", "c1");
+
+    install_hook(&env, "pre-commit", "echo 'lint failed' >&2\nexit 1");
+    env.write("a.txt", "b\n");
+    env.ok(&["add", "a.txt"]);
+    env.veyra(&["commit", "-m", "blocked"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("pre-commit hook failed"));
+    assert_eq!(env.git(&["log", "--format=%s"]).trim(), "c1");
+    env.ok(&["commit", "-m", "bypassed", "--no-verify"]);
+
+    install_hook(&env, "pre-commit", "exit 0");
+    install_hook(&env, "commit-msg", "printf '\nTicket: ABC-123\n' >> \"$1\"");
+    install_hook(&env, "post-commit", "echo done > .git/post-commit-ran");
+    env.commit_file("a.txt", "c\n", "feat: with hooks");
+    let body = env.git(&["log", "-1", "--format=%B"]);
+    assert!(body.contains("Ticket: ABC-123"), "commit-msg hook edited the message: {body}");
+    assert!(env.repo.join(".git/post-commit-ran").exists());
+}
+
+#[test]
+fn commit_all_restores_the_index_when_a_hook_fails() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "a\n", "c1");
+    install_hook(&env, "pre-commit", "exit 1");
+    env.write("a.txt", "changed\n");
+    env.veyra(&["commit", "-am", "nope"]).assert().failure();
+    assert_eq!(
+        env.git(&["status", "--porcelain"]),
+        " M a.txt\n",
+        "the change is unstaged again, like git's temporary index"
+    );
+}
+
+#[test]
+fn pre_push_hook_sees_the_updates_and_can_block() {
+    require_git!();
+    let env = Env::new();
+    let bare = bare_origin(&env);
+    env.commit_file("a.txt", "a\n", "c1");
+    install_hook(&env, "pre-push", "cat > .git/pre-push-input\necho \"$1 $2\" > .git/pre-push-args\nexit 1");
+    env.veyra(&["push", "-u"]).assert().failure().stderr(predicate::str::contains("pre-push hook failed"));
+    assert_eq!(git_in(&env, &bare, &["branch"]), "", "nothing was pushed");
+    let input = std::fs::read_to_string(env.repo.join(".git/pre-push-input")).unwrap();
+    let head = env.git(&["rev-parse", "HEAD"]);
+    assert!(input.starts_with(&format!("main {} refs/heads/main 0000000", head.trim())), "{input}");
+    assert!(std::fs::read_to_string(env.repo.join(".git/pre-push-args")).unwrap().starts_with("origin "));
+    env.ok(&["push", "-u", "--no-verify"]);
+    assert!(git_in(&env, &bare, &["branch"]).contains("main"));
+}
+
+#[test]
+fn blame_matches_git() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "one\ntwo\nthree\n", "first");
+    env.commit_file("a.txt", "one\nTWO\nthree\nfour\n", "second");
+    let ours: serde_json::Value = serde_json::from_str(&env.ok(&["blame", "a.txt", "--json"])).unwrap();
+    let git = env.git(&["blame", "-l", "-s", "a.txt"]);
+    let git_ids: Vec<&str> =
+        git.lines().map(|l| l.split_whitespace().next().unwrap().trim_start_matches('^')).collect();
+    let our_ids: Vec<String> =
+        ours.as_array().unwrap().iter().map(|l| l["commit"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(our_ids.len(), 4);
+    for (o, g) in our_ids.iter().zip(&git_ids) {
+        assert!(o.starts_with(g) || g.starts_with(o.as_str()), "{o} vs {g}");
+    }
+    assert_eq!(ours[1]["text"], "TWO");
+    assert!(env.ok(&["blame", "a.txt", "-L", "2,2"]).lines().count() == 1);
+}
+
+#[test]
+fn log_graph_draws_merges() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "a\n", "base");
+    env.ok(&["switch", "-c", "feature"]);
+    env.commit_file("f.txt", "f\n", "feature work");
+    env.ok(&["switch", "main"]);
+    env.commit_file("m.txt", "m\n", "main work");
+    env.ok(&["merge", "feature"]);
+    let graph = env.ok(&["log", "--graph"]);
+    assert!(graph.contains("|\\"), "{graph}");
+    assert!(graph.contains("|/"), "{graph}");
+    assert_eq!(graph.lines().filter(|l| l.contains('*')).count(), 4, "{graph}");
+}
+
+#[test]
+fn clean_removes_untracked_files_recoverably() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("src/a.txt", "a\n", "c1");
+    env.write("src/junk.tmp", "junk\n");
+    env.write("build/out.bin", "artifact\n");
+    env.veyra(&["clean"]).assert().failure().stderr(predicate::str::contains("-f"));
+    let dry = env.ok(&["clean", "-n"]);
+    assert!(dry.contains("src/junk.tmp") && !dry.contains("build/out.bin"), "without -d, untracked dirs stay: {dry}");
+    env.ok(&["clean", "-f", "-d"]);
+    assert_eq!(env.read("src/junk.tmp"), None);
+    assert_eq!(env.read("build/out.bin"), None);
+    env.ok(&["undo"]);
+    assert_eq!(env.read("build/out.bin").as_deref(), Some("artifact\n"));
+}
+
+#[test]
+fn branch_rename_keeps_the_reflog_and_upstream() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "a\n", "c1");
+    env.commit_file("a.txt", "b\n", "c2");
+    env.ok(&["config", "branch.main.remote", "origin"]);
+    let before = env.git(&["reflog", "show", "main"]).lines().count();
+    env.ok(&["branch", "-m", "trunk"]);
+    let after = env.git(&["reflog", "show", "trunk"]).lines().count();
+    assert_eq!(after, before + 1, "history kept plus the rename entry");
+    assert_eq!(env.git(&["config", "branch.trunk.remote"]).trim(), "origin");
+    assert_eq!(env.git(&["branch", "--show-current"]).trim(), "trunk");
+}
+
+#[test]
+fn interactive_rebase_drops_rewords_and_squashes() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "base\n", "base");
+    env.ok(&["switch", "-c", "topic"]);
+    env.commit_file("one.txt", "1\n", "c1");
+    env.commit_file("two.txt", "2\n", "c2");
+    env.commit_file("three.txt", "3\n", "c3");
+    env.commit_file("four.txt", "4\n", "c4");
+
+    // drop c2, fold c3 into c1 (fixup), reword c4.
+    let seq = r#"sed -i -e 's/^pick \([0-9a-f]*\) c2$/drop \1 c2/' -e 's/^pick \([0-9a-f]*\) c3$/fixup \1 c3/' -e 's/^pick \([0-9a-f]*\) c4$/reword \1 c4/'"#;
+    let out = env
+        .veyra(&["rebase", "-i", "main"])
+        .env("GIT_SEQUENCE_EDITOR", seq)
+        .env("GIT_EDITOR", "sed -i -e '1s/.*/c4 reworded/'")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(env.git(&["log", "--format=%s"]), "c4 reworded\nc1\nbase\n");
+    assert_eq!(env.read("two.txt"), None, "c2 was dropped");
+    assert_eq!(env.read("three.txt").as_deref(), Some("3\n"), "c3 was folded into c1");
+    assert_eq!(env.git(&["show", "--name-only", "--format=", "HEAD~1"]), "one.txt\nthree.txt\n");
+    env.assert_git_clean_and_valid();
+    env.ok(&["undo"]);
+    assert_eq!(env.git(&["log", "--format=%s"]).lines().count(), 5, "undo restores all four commits");
+}
+
+#[test]
+fn interactive_rebase_can_reorder_and_stop_to_edit() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "base\n", "base");
+    env.commit_file("x.txt", "x\n", "cx");
+    env.commit_file("y.txt", "y\n", "cy");
+    // Swap the two commits and stop at cx to amend it.
+    let seq = "sed -i -n -e '/ cx$/{s/^pick/edit/;h;d}' -e '/ cy$/{p;x;p;d}' -e p";
+    env.veyra(&["rebase", "-i", "HEAD~2"])
+        .env("GIT_SEQUENCE_EDITOR", seq)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Stopped at"));
+    env.write("x.txt", "x amended\n");
+    env.ok(&["add", "x.txt"]);
+    env.ok(&["commit", "--amend", "--no-edit"]);
+    env.ok(&["rebase", "--continue"]);
+    assert_eq!(env.git(&["log", "--format=%s"]), "cx\ncy\nbase\n");
+    assert_eq!(env.read("x.txt").as_deref(), Some("x amended\n"));
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn add_patch_stages_selected_hunks_only() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n", "c1");
+    env.write("a.txt", "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nL\n");
+    assert_cmd::Command::from_std(env.veyra(&["add", "-p"]))
+        .write_stdin("y\nn\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Staged 1 hunk"));
+    let staged = env.git(&["diff", "--cached"]);
+    assert!(staged.contains("+A") && !staged.contains("+L"), "{staged}");
+    let unstaged = env.git(&["diff"]);
+    assert!(unstaged.contains("+L") && !unstaged.contains("+A"), "{unstaged}");
+    env.git(&["fsck", "--strict"]);
+}
+
+#[test]
+fn branch_cleanup_and_compare() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "a\n", "base");
+    env.ok(&["branch", "merged-one"]);
+    env.ok(&["switch", "-c", "wip"]);
+    env.commit_file("w.txt", "w\n", "wip work");
+    env.ok(&["switch", "main"]);
+
+    let cmp: serde_json::Value = serde_json::from_str(&env.ok(&["branch", "compare", "wip", "--json"])).unwrap();
+    assert_eq!((cmp["ahead"].as_u64(), cmp["behind"].as_u64()), (Some(1), Some(0)));
+    assert_eq!(cmp["changed_files"], serde_json::json!(["w.txt"]));
+
+    assert!(env.ok(&["branch", "cleanup", "--dry-run"]).contains("merged-one"));
+    env.ok(&["branch", "cleanup"]);
+    let branches = env.git(&["branch"]);
+    assert!(!branches.contains("merged-one") && branches.contains("wip"), "only merged branches go: {branches}");
+    env.ok(&["undo"]);
+    assert!(env.git(&["branch"]).contains("merged-one"));
+}
+
+#[test]
+fn sync_fast_forwards_or_rebases_onto_the_upstream() {
+    require_git!();
+    let env = Env::new();
+    let bare = bare_origin(&env);
+    env.commit_file("a.txt", "a\n", "c1");
+    env.ok(&["push", "-u"]);
+    let other = env.home.join("other");
+    git_in(&env, &env.home, &["clone", "-q", bare.to_str().unwrap(), other.to_str().unwrap()]);
+    std::fs::write(other.join("b.txt"), "b\n").unwrap();
+    git_in(&env, &other, &["add", "b.txt"]);
+    git_in(&env, &other, &["commit", "-qm", "their commit"]);
+    git_in(&env, &other, &["push", "-q", "origin", "main"]);
+
+    env.ok(&["sync"]);
+    assert_eq!(env.git(&["log", "--format=%s"]), "their commit\nc1\n", "fast-forwarded");
+
+    // Now both sides have new commits: sync rebases ours on top, and --push publishes.
+    std::fs::write(other.join("c.txt"), "c\n").unwrap();
+    git_in(&env, &other, &["add", "c.txt"]);
+    git_in(&env, &other, &["commit", "-qm", "their second"]);
+    git_in(&env, &other, &["push", "-q", "origin", "main"]);
+    env.commit_file("d.txt", "d\n", "our commit");
+    env.ok(&["sync", "--push"]);
+    assert_eq!(env.git(&["log", "--format=%s"]), "our commit\ntheir second\ntheir commit\nc1\n");
+    assert_eq!(git_in(&env, &bare, &["log", "-1", "--format=%s", "main"]).trim(), "our commit");
+}

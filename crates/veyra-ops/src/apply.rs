@@ -223,6 +223,18 @@ impl OpLog<'_> {
                 target.kind
             );
         }
+        if !force {
+            let pushed = published_commits(self.repo, &target)?;
+            if !pushed.is_empty() {
+                bail!(
+                    "{} already pushed ({}); undoing it here would not remove it from the remote, and the next push would be rejected\n  \
+                     hint: `veyra revert <commit>` adds a commit that reverses it — safe on shared branches\n  \
+                     hint: `veyra undo --force` undoes it locally anyway (you would then need `veyra push --force-with-lease`)",
+                    if pushed.len() == 1 { "that commit is" } else { "those commits are" },
+                    pushed.join(", ")
+                );
+            }
+        }
         let report = apply_views(self.repo, &target.after, &target.before, &tx, force, dry_run)?;
         if dry_run {
             return Ok((target, None, report));
@@ -336,4 +348,41 @@ impl OpLog<'_> {
             }
         }
     }
+}
+
+/// Commits an operation added to local branches that are already reachable from a
+/// remote-tracking ref (i.e. pushed), as `short-id on origin/main`.
+fn published_commits(repo: &Repo, op: &Operation) -> Result<Vec<String>> {
+    let remote_tips: Vec<(String, ObjectId)> = repo
+        .all_refs()?
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("refs/remotes/") && !name.ends_with("/HEAD"))
+        .filter_map(|(name, id)| repo.peel_to_commit(id).ok().map(|c| (name, c)))
+        .collect();
+    if remote_tips.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Commits that were already on a remote when the operation ran came *from* the remote
+    // (e.g. a fast-forward pull); undoing those locally is harmless.
+    let tips_before: Vec<ObjectId> = op
+        .before
+        .refs
+        .iter()
+        .filter(|(name, _)| name.starts_with("refs/remotes/"))
+        .filter_map(|(_, hex)| parse_id(hex).ok().and_then(|id| repo.peel_to_commit(id).ok()))
+        .collect();
+    let mut out = Vec::new();
+    for (name, after) in &op.after.refs {
+        if !name.starts_with("refs/heads/") || op.before.refs.get(name) == Some(after) {
+            continue;
+        }
+        let Ok(commit) = parse_id(after).and_then(|id| repo.peel_to_commit(id)) else { continue };
+        if tips_before.iter().any(|tip| repo.is_ancestor(commit, *tip).unwrap_or(false)) {
+            continue;
+        }
+        if let Some((remote, _)) = remote_tips.iter().find(|(_, tip)| repo.is_ancestor(commit, *tip).unwrap_or(false)) {
+            out.push(format!("{} on {}", veyra_core::short(&commit), veyra_core::refs::shorten(remote)));
+        }
+    }
+    Ok(out)
 }

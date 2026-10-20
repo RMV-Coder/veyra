@@ -123,24 +123,7 @@ impl Repo {
             return Ok(MergeOutcome::Merged { commit });
         }
 
-        // Conflicts: write the merged tree (with conflict markers) and record stages in the index,
-        // exactly like Git, so `git status`, editors and mergetools understand the state.
-        self.checkout_tree(merged_tree, false)?;
-        let mut index = self.load_index()?;
-        outcome.tree_merge.index_changed_after_applying_conflicts(
-            &mut index,
-            how,
-            gix::merge::tree::apply_index_entries::RemovalMode::Prune,
-        );
-        index.remove_tree();
-        index.write(gix::index::write::Options::default())?;
-        let paths: Vec<BString> = outcome
-            .tree_merge
-            .conflicts
-            .iter()
-            .filter(|c| c.is_unresolved(how))
-            .map(|c| c.ours.location().to_owned())
-            .collect();
+        let paths = self.write_conflicted_result(&outcome.tree_merge, merged_tree)?;
 
         let [merge_head, merge_msg, merge_mode] = merge_files(self);
         std::fs::write(&merge_head, format!("{theirs}\n"))?;
@@ -152,6 +135,31 @@ impl Repo {
         std::fs::write(&merge_msg, msg)?;
         std::fs::write(&merge_mode, if no_ff { "no-ff" } else { "" })?;
         Ok(MergeOutcome::Conflicts { paths })
+    }
+
+    /// Write a conflicted merge result like Git does: the merged tree (with conflict markers) goes
+    /// to the worktree, and conflict stages 1–3 go to the index, so `git status`, editors and
+    /// mergetools understand the state. Returns the conflicted paths.
+    pub(crate) fn write_conflicted_result(
+        &self,
+        outcome: &gix::merge::tree::Outcome<'_>,
+        merged_tree: ObjectId,
+    ) -> Result<Vec<BString>> {
+        let how = gix::merge::tree::TreatAsUnresolved::git();
+        self.checkout_tree(merged_tree, false)?;
+        let mut index = self.load_index()?;
+        outcome.index_changed_after_applying_conflicts(
+            &mut index,
+            how,
+            gix::merge::tree::apply_index_entries::RemovalMode::Prune,
+        );
+        index.remove_tree();
+        index.write(gix::index::write::Options::default())?;
+        let mut paths: Vec<BString> =
+            outcome.conflicts.iter().filter(|c| c.is_unresolved(how)).map(|c| c.ours.location().to_owned()).collect();
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
     }
 
     fn write_merge_commit(&self, tree: ObjectId, parents: &[ObjectId], message: &str) -> Result<ObjectId> {

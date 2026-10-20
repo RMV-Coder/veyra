@@ -30,7 +30,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git add <paths>` / `.` | `veyra add <paths>` (alias `stage`) | ✅ | Globs (`*.rs`) work even in PowerShell. Stages deletions, like Git 2.x. |
 | `git add -A` / `-u` | `veyra add -A` / `-u` | ✅ | |
 | `git add -f` | `veyra add --force` | ✅ | Needed for ignored files |
-| `git add -p` | `veyra add --patch` | 🗓 2 | |
+| `git add -p` | `veyra add -p [paths]` | ✅ | `y`/`n`/`q`/`a`/`d` per hunk, deletions and binary files as a whole. No hunk splitting or editing yet. |
 | `git rm [--cached] [-r] [-f]` | `veyra rm` (alias `remove`) | ✅ | Refuses files with changes unless `-f` |
 | `git mv` | `veyra mv` (alias `move`) | ✅ | |
 | `git restore <paths>` | `veyra restore <paths>` / `veyra discard <paths>` | ✅ | **Difference:** the old contents are checkpointed first, so `veyra undo` recovers them |
@@ -41,7 +41,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | — | `veyra commit --intent <id>` | ✅ | Adds `Intent:` |
 | — | secret scan + intent check on commit | ✅ | `--allow-secrets`, `--no-verify` |
 | `git commit -S` | signed commits | 🗓 3 | Veyra warns when `commit.gpgsign` is on and it can't sign |
-| Git hooks | — | 🗓 2 | Veyra warns when hooks are installed that it doesn't run |
+| Git hooks | `pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, `pre-push`, `post-checkout`, `post-merge` | ✅ | `core.hooksPath` respected. Hooks run through Git for Windows' `sh` on Windows. Never run in repositories you don't own. `--no-verify` skips them. |
 | — | `veyra commit --smart` / `--split` | 🗓 5 | Optional AI. Always proposed, never automatic. |
 
 ## History and inspection
@@ -49,10 +49,10 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | Git | Veyra | Status | Notes |
 |---|---|---|---|
 | `git log [revs] [-n N] [--oneline] [--all]` | `veyra log …` | ✅ | Decorations. `--json`. `--trailer Intent=<id>`. `--all` hides `refs/veyra/*`. |
-| `git log --graph` | `veyra log --graph` | 🗓 2 | |
+| `git log --graph` | `veyra log --graph` | ✅ | Topological order, lane rendering like Git's |
 | `git show [rev]` | `veyra show [rev] [--stat]` | ✅ | |
 | `git diff` / `--staged` / `<rev>` / `<a> <b>` / `a..b` | `veyra diff …` | ✅ | `--stat`, `--name-only`, `--name-status`, `-U<n>`, `-- <paths>`. Hunks match `git diff`. |
-| `git blame` | `veyra blame` | 🗓 2 | gix has blame |
+| `git blame [-L a,b]` | `veyra blame <file> [-L a,b] [--rev R] [--json]` | ✅ | Line attribution matches `git blame` |
 | `git reflog` | `veyra op log` | ✅ | Records *every* operation, including staging and uncommitted files |
 | `git shortlog`, `describe`, `grep`, `bisect` | same names | 🗓 2–3 | |
 | — | `veyra diff --semantic / --functions` | 🗓 4 | Tree-sitter |
@@ -64,9 +64,11 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git branch` / `-a` / `-v` | `veyra branch` / `branch list` | ✅ | `--json` |
 | `git branch <name> [start]` | `veyra branch <name>` / `branch create <name>` | ✅ | A branch literally named `list`, `create`, … needs the `create` form |
 | `git branch -d` / `-D` | `veyra branch -d/-D` / `branch delete [--force]` | ✅ | `veyra undo` restores deleted branches |
-| `git branch -m` | `veyra branch -m` / `branch rename` | ✅ | |
+| `git branch -m` | `veyra branch -m` / `branch rename` | ✅ | Keeps the reflog and `branch.<name>.*` upstream config |
 | — | `veyra branch stale [--days N]` | ✅ | Age + merged status |
-| — | `veyra branch graph / cleanup / compare / explain` | 🗓 2 | |
+| — | `veyra branch cleanup [--dry-run]` | ✅ | Deletes local branches fully merged into the default branch. `veyra undo` restores them. |
+| — | `veyra branch compare <branch> [base]` | ✅ | Ahead/behind, merge base, changed files and a suggestion. `--json`. |
+| — | `veyra branch graph / explain` | 🗓 2 | `veyra log --graph --all` covers the graph today |
 | `git switch <b>` / `-c` / `--detach` / `-` | `veyra switch …` | ✅ | Refuses to overwrite local changes. `--force` checkpoints first. Creates tracking branches from `origin/<b>`. |
 | `git checkout <b>` / `-b` / `-- <paths>` | `veyra checkout …` | ✅ | Prefer `switch` and `restore` |
 
@@ -78,7 +80,10 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git merge --abort` / `--continue` | `veyra merge --abort` / `--continue` | ✅ | Abort replays the operation log |
 | `git reset [--soft\|--mixed\|--hard] [rev]` | `veyra reset …` | ✅ | **Difference:** `--hard` checkpoints first |
 | `git reset <paths>` | `veyra reset <paths>` / `unstage` | ✅ | |
-| `git rebase [-i]`, `cherry-pick`, `revert` | same names | 🗓 2 | `veyra undo` already reverses a finished `git rebase` |
+| `git cherry-pick [-x] [-n] [-m N]` | `veyra cherry-pick` | ✅ | Keeps the original author. Conflicts leave `CHERRY_PICK_HEAD` like Git. `--continue` / `--abort`. |
+| `git revert [-n] [-m N]` | `veyra revert` | ✅ | The safe way to reverse pushed commits. `--continue` / `--abort`. |
+| `git rebase <upstream> [--onto X]` | `veyra rebase` | ✅ | Defaults to the branch's upstream. `--continue` / `--skip` / `--abort`. State lives in `.git/veyra/rebase-state`, so plain `git rebase --continue` doesn't know about it. `veyra undo` restores the pre-rebase branch. |
+| `git rebase -i` | `veyra rebase -i <upstream>` | ✅ | `pick`, `reword`, `edit`, `squash`, `fixup`, `drop` (and their one-letter forms), plus reordering. Uses `GIT_SEQUENCE_EDITOR` / `sequence.editor`, then the commit editor. No `exec` or `break` yet. |
 | `git rerere` | `veyra merge resolutions` | 🗓 4 | |
 | — | `veyra merge --semantic / --assist / --explain / --simulate` | 🗓 4–5 | Conservative by default |
 
@@ -98,8 +103,8 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `veyra checkpoint enable / disable` | ✅ | Toggles `veyra.autoCheckpoint` (snapshot on *every* command) |
 | `veyra checkpoint watch --interval 10m` | ✅ | Foreground timer, no daemon |
 | `veyra checkpoint prune --older-than 14d` | ✅ | |
-| `git stash` / `pop` / `list` / `drop` | 🗓 2 | Will be `veyra stash` (alias `shelve` / `unshelve`), compatible with `refs/stash` |
-| `git clean` | 🗓 2 | Will checkpoint first |
+| `veyra stash [push] [-m] [-u] [--keep-index]` / `list` / `show [-p]` / `apply [--index]` / `pop` / `drop` / `clear` (aliases `shelve`, `unshelve`) | ✅ | Same `refs/stash` structure and reflog as Git: `git stash` and `veyra stash` see each other's entries. A conflicted pop keeps the entry. |
+| `veyra clean -f [-d] [-n] [paths]` | ✅ | Like `git clean`, but the files are checkpointed first, so `veyra undo` brings them back. Ignored files are never removed (no `-x` yet). |
 
 ## Remotes
 
@@ -108,9 +113,9 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git remote [-v]`, `add`, `remove` | `veyra remote …` | ✅ | |
 | `git fetch [remote]` | `veyra fetch` | ✅ | |
 | `git pull [--ff-only]` | `veyra pull` | ✅ | Fetch + fast-forward or merge |
-| `git push …` | `veyra push` | 🗓 2 | gitoxide has no push yet. Use `git push` meanwhile. |
+| `git push [remote] [refspec…]` | `veyra push` | ✅ | Implemented on gix's transport (HTTPS, SSH, local). Supports `-u`, `--tags`, `--delete`, `+refspec`, `--force`, `--force-with-lease`, `--dry-run`, `--no-verify`. Credential helpers are used. Packs are sent without delta compression for now (larger than Git's). |
 | `git ls-remote` | `veyra remote refs` | 🗓 2 | |
-| — | `veyra sync` | 🗓 2 | Fetch, then ff/rebase if clean. Pushes only with `--push`. |
+| — | `veyra sync [--push]` | ✅ | Fetch, then fast-forward, or rebase onto the upstream if both sides moved. Refuses with uncommitted changes. Pushes only with `--push`. |
 
 ## Tags and releases
 
@@ -177,7 +182,8 @@ Committed, shared policy:
 |---|---|
 | `VEYRA_AGENT=1` | Agent mode: destructive commands (`reset --hard`, `branch -D`, `switch --force`, `discard`/`restore`, `undo --force`, `op restore`, `checkpoint restore`) require `--yes` |
 | `NO_COLOR` | Disables colour |
-| `GIT_EDITOR`, `VISUAL`, `EDITOR` | Commit message editor (after `core.editor`) |
+| `GIT_EDITOR`, `VISUAL`, `EDITOR` | Commit message editor (after `core.editor`), run like Git: `sh -c '<editor> "$@"'` |
+| `GIT_SEQUENCE_EDITOR` | Todo-list editor for `rebase -i` (before `sequence.editor`) |
 
 ## Exit codes
 

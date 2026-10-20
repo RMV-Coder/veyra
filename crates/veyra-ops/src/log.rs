@@ -49,7 +49,7 @@ impl Operation {
 
     /// Can `veyra undo` target this operation?
     pub fn is_undoable(&self) -> bool {
-        !matches!(self.kind.as_str(), "undo" | "redo" | "checkpoint" | "init") && !self.is_noop()
+        !matches!(self.kind.as_str(), "undo" | "redo" | "checkpoint" | "init" | "push") && !self.is_noop()
     }
 }
 

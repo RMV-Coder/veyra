@@ -2,6 +2,7 @@
 
 mod cli;
 mod cmd;
+mod editor;
 mod explain;
 mod ui;
 
@@ -52,6 +53,18 @@ impl std::fmt::Display for Reported {
 impl std::error::Error for Reported {}
 
 fn main() -> ExitCode {
+    // clap's derived parser for a CLI this size, plus deep gitoxide call chains, can exceed
+    // Windows' 1 MiB main-thread stack in debug builds. Run on a thread with a roomier stack.
+    std::thread::Builder::new()
+        .name("veyra".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(real_main)
+        .expect("failed to start the main thread")
+        .join()
+        .unwrap_or(ExitCode::FAILURE)
+}
+
+fn real_main() -> ExitCode {
     let cli = cli::Cli::parse();
     let cwd = match &cli.dir {
         Some(d) => d.clone(),

@@ -16,6 +16,8 @@ pub struct CommitRequest {
     pub allow_empty: bool,
     /// Trailers appended to the message, e.g. `("Assisted-by", "Claude")`.
     pub trailers: Vec<(String, String)>,
+    /// Use this author instead of the configured identity (cherry-pick and rebase keep the original author).
+    pub author: Option<gix::actor::Signature>,
 }
 
 /// A decoded commit, for display.
@@ -154,7 +156,7 @@ impl Repo {
 
         let committer: gix::actor::Signature =
             self.git.committer().ok_or_else(|| anyhow!("committer identity is not configured"))??.to_owned()?;
-        let author = match author {
+        let author = match request.author.clone().or(author) {
             Some(a) => a,
             None => self.git.author().ok_or_else(|| anyhow!("author identity is not configured"))??.to_owned()?,
         };
@@ -230,22 +232,6 @@ impl Repo {
         let config = self.git.config_snapshot();
         if config.boolean("commit.gpgsign").unwrap_or(false) {
             out.push("commit.gpgsign is enabled, but Veyra cannot sign commits yet; this commit is unsigned".into());
-        }
-        let hooks_dir = config
-            .string("core.hooksPath")
-            .map(|p| std::path::PathBuf::from(p.to_string()))
-            .unwrap_or_else(|| self.common_dir().join("hooks"));
-        let hooks_dir = if hooks_dir.is_relative() {
-            self.workdir().map(|w| w.join(&hooks_dir)).unwrap_or(hooks_dir)
-        } else {
-            hooks_dir
-        };
-        for hook in ["pre-commit", "commit-msg", "prepare-commit-msg", "post-commit"] {
-            if hooks_dir.join(hook).is_file() {
-                out.push(format!(
-                    "a '{hook}' Git hook is installed, but Veyra does not run hooks yet; use `git commit` if you rely on it"
-                ));
-            }
         }
         out
     }

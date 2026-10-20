@@ -20,6 +20,8 @@ pub fn branch(ctx: &Ctx, args: BranchArgs) -> Result<()> {
             BranchCommand::Delete { name, force } => delete(ctx, &repo, &name, force),
             BranchCommand::Rename { old, new } => rename(ctx, &repo, &old, &new),
             BranchCommand::Stale { days } => stale(ctx, &repo, days),
+            BranchCommand::Cleanup { dry_run } => cleanup(ctx, &repo, dry_run),
+            BranchCommand::Compare { branch, base } => compare(ctx, &repo, &branch, base.as_deref()),
         };
     }
     if args.delete || args.force_delete {
@@ -125,17 +127,8 @@ fn delete(ctx: &Ctx, repo: &Repo, name: &str, force: bool) -> Result<()> {
 
 fn rename(ctx: &Ctx, repo: &Repo, old: &str, new: &str) -> Result<()> {
     let (old_full, new_full) = (branch_full_name(old)?, branch_full_name(new)?);
-    let target = repo.ref_target(&old_full)?.with_context(|| format!("branch '{old}' not found"))?;
-    if repo.ref_target(&new_full)?.is_some() {
-        bail!("a branch named '{new}' already exists");
-    }
-    let is_current = repo.head_state()?.branch_short() == Some(old);
     journal(ctx, repo, "branch", false, || {
-        repo.set_ref(&new_full, target, Some(None), &format!("branch: renamed {old_full} to {new_full}"))?;
-        if is_current {
-            repo.set_head_symbolic(&new_full, &format!("branch: renamed {old} to {new}"))?;
-        }
-        repo.delete_ref(&old_full, Some(target))?;
+        repo.rename_branch(&old_full, &new_full)?;
         Ok(((), format!("rename branch {old} → {new}")))
     })?;
     anstream::println!("Renamed branch {old} → {}", ui::green(new));
@@ -229,6 +222,7 @@ pub fn switch(ctx: &Ctx, branch: Option<String>, create: Option<String>, detach:
             Some(s) => Some(repo.rev_parse_commit(s)?),
             None => repo.head_commit_id()?,
         };
+        let previous = repo.head_commit_id()?;
         journal(ctx, &repo, "switch", true, || {
             if let Some(start) = start {
                 repo.set_ref(
@@ -242,6 +236,7 @@ pub fn switch(ctx: &Ctx, branch: Option<String>, create: Option<String>, detach:
             Ok(((), format!("create and switch to {new}")))
         })?;
         anstream::println!("Switched to a new branch '{}'", ui::green(&new));
+        post_checkout(&repo, previous);
         return Ok(());
     }
     let name = branch.context("which branch? usage: veyra switch <branch> | -c <new> | --detach <commit>")?;
@@ -255,16 +250,28 @@ pub fn switch(ctx: &Ctx, branch: Option<String>, create: Option<String>, detach:
         anstream::println!("Already on '{name}'");
         return Ok(());
     }
+    let previous = repo.head_commit_id()?;
     journal(ctx, &repo, "switch", true, || {
         repo.switch(target.clone(), force)?;
         Ok(((), format!("switch to {name}")))
     })?;
+    post_checkout(&repo, previous);
     if detach {
         anstream::println!("HEAD is now at {} (detached)", name);
     } else {
         anstream::println!("Switched to branch '{}'", ui::green(&name));
     }
     Ok(())
+}
+
+/// Run the `post-checkout` hook like git: `<previous HEAD> <new HEAD> 1` (1 = branch checkout).
+fn post_checkout(repo: &Repo, previous: Option<veyra_core::ObjectId>) {
+    let null = veyra_core::ObjectId::null(repo.object_hash()).to_string();
+    let old = previous.map(|p| p.to_string()).unwrap_or_else(|| null.clone());
+    let new = repo.head_commit_id().ok().flatten().map(|n| n.to_string()).unwrap_or(null);
+    if let Some(err) = repo.run_post_hook("post-checkout", &[&old, &new, "1"]) {
+        ui::warn(&err);
+    }
 }
 
 /// `veyra switch -`: the branch checked out before the current one (from HEAD's reflog).
@@ -386,6 +393,9 @@ pub fn merge(
             return Err(crate::Reported.into());
         }
     }
+    if let Some(err) = repo.run_post_hook("post-merge", &["0"]) {
+        ui::warn(&err);
+    }
     Ok(())
 }
 
@@ -495,5 +505,81 @@ pub fn tag(ctx: &Ctx, args: TagArgs) -> Result<()> {
         Ok(((), format!("tag {name} at {}", veyra_core::short(&target_id))))
     })?;
     anstream::println!("Tagged {} as {}", veyra_core::short(&target_id), ui::green(&name));
+    Ok(())
+}
+
+fn cleanup(ctx: &Ctx, repo: &Repo, dry_run: bool) -> Result<()> {
+    let base_name = repo.default_branch()?.context("no default branch (main/master) to compare against")?;
+    let base = repo.ref_target(&format!("refs/heads/{base_name}"))?.context("default branch vanished")?;
+    let merged: Vec<_> = repo
+        .branches(false)?
+        .into_iter()
+        .filter(|b| !b.is_head && b.name != base_name && repo.is_ancestor(b.target, base).unwrap_or(false))
+        .collect();
+    if merged.is_empty() {
+        anstream::println!("No branches are fully merged into {base_name}.");
+        return Ok(());
+    }
+    if dry_run {
+        for b in &merged {
+            anstream::println!("Would delete {} ({})", b.name, veyra_core::short(&b.target));
+        }
+        return Ok(());
+    }
+    let edits: Vec<(String, Option<veyra_core::ObjectId>)> =
+        merged.iter().map(|b| (b.full_name.clone(), None)).collect();
+    journal(ctx, repo, "branch", false, || {
+        repo.set_refs(&edits, &format!("branch cleanup: merged into {base_name}"))?;
+        Ok(((), format!("cleanup: delete {} merged into {base_name}", plural(merged.len(), "branch"))))
+    })?;
+    for b in &merged {
+        anstream::println!("Deleted {} (was {})", b.name, veyra_core::short(&b.target));
+    }
+    ui::hint("`veyra undo` restores them all");
+    Ok(())
+}
+
+fn compare(ctx: &Ctx, repo: &Repo, branch: &str, base: Option<&str>) -> Result<()> {
+    let a = repo.rev_parse_commit(branch)?;
+    let base_label = match base {
+        Some(b) => b.to_owned(),
+        None => repo.head_label()?,
+    };
+    let b = repo.rev_parse_commit(base.unwrap_or("HEAD"))?;
+    let (ahead, behind) = repo.ahead_behind(a, b)?;
+    let merge_base = repo.git().merge_base(a, b).ok().flatten().map(|m| m.detach());
+    let changed = match merge_base {
+        Some(mb) => veyra_core::flat::diff(&repo.flat_from_commit(mb)?, &repo.flat_from_commit(a)?),
+        None => Vec::new(),
+    };
+    if ctx.json {
+        ui::json(&json!({
+            "branch": branch, "base": base_label, "ahead": ahead, "behind": behind,
+            "merge_base": merge_base.map(|m| m.to_string()),
+            "changed_files": changed.iter().map(|c| c.path.to_string()).collect::<Vec<_>>(),
+        }));
+        return Ok(());
+    }
+    anstream::println!("{}", ui::bold(&format!("{branch} vs {base_label}")));
+    anstream::println!("  Commits ahead:   {ahead}");
+    anstream::println!("  Commits behind:  {behind}");
+    match merge_base {
+        Some(mb) => anstream::println!("  Merge base:      {}", veyra_core::short(&mb)),
+        None => anstream::println!("  Merge base:      none (unrelated histories)"),
+    }
+    anstream::println!("  Changed files:   {} (since the merge base)", changed.len());
+    for c in changed.iter().take(20) {
+        anstream::println!("    {} {}", c.status_letter(), c.path);
+    }
+    if changed.len() > 20 {
+        anstream::println!("    … and {} more", changed.len() - 20);
+    }
+    let advice = match (ahead, behind) {
+        (0, 0) => "identical".to_owned(),
+        (0, _) => format!("{branch} is behind; `veyra switch {branch} && veyra merge {base_label}` fast-forwards it"),
+        (_, 0) => format!("fast-forwardable: `veyra merge {branch}` on {base_label}"),
+        _ => format!("diverged: `veyra rebase {base_label}` on {branch}, or merge"),
+    };
+    anstream::println!("  Suggested:       {advice}");
     Ok(())
 }

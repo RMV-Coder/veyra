@@ -5,6 +5,8 @@ mod history;
 mod remote;
 mod repo;
 mod safety;
+mod sequence;
+mod stash;
 mod tools;
 
 use anyhow::Result;
@@ -20,7 +22,8 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
         Init { directory, initial_branch } => repo::init(ctx, directory, initial_branch),
         Clone { url, directory } => repo::clone(ctx, &url, directory),
         Status { short } => repo::status(ctx, short),
-        Add { paths, all, update, force } => repo::add(ctx, paths, all, update, force),
+        Add { paths, patch: true, .. } => repo::add_patch(ctx, paths),
+        Add { paths, all, update, force, patch: false } => repo::add(ctx, paths, all, update, force),
         Rm { paths, cached, force, recursive } => repo::rm(ctx, paths, cached, force, recursive),
         Mv { source, destination, force } => repo::mv(ctx, &source, &destination, force),
         Restore(args) => repo::restore(ctx, args),
@@ -34,6 +37,8 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
         Log(args) => history::log(ctx, args),
         Show { revision, stat } => history::show(ctx, revision, stat),
         Diff(args) => history::diff(ctx, args),
+        Blame { file, rev, lines } => history::blame(ctx, &file, rev, lines),
+        Clean { force, dry_run, d, paths } => repo::clean(ctx, force, dry_run, d, paths),
         Branch(args) => branch::branch(ctx, args),
         Switch { branch, create, detach, force } => branch::switch(ctx, branch, create, detach, force),
         Checkout { target, new_branch, force, paths } => branch::checkout(ctx, target, new_branch, force, paths),
@@ -42,13 +47,24 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
         }
         Reset { soft, mixed: _, hard, target, paths } => branch::reset(ctx, soft, hard, target, paths),
         Tag(args) => branch::tag(ctx, args),
+        CherryPick(args) => sequence::pick(ctx, veyra_core::pick::PickKind::CherryPick, args),
+        Revert(args) => sequence::pick(ctx, veyra_core::pick::PickKind::Revert, args),
+        Rebase { upstream, onto, interactive, continue_, skip, abort } => {
+            sequence::rebase(ctx, upstream, onto, interactive, continue_, skip, abort)
+        }
         Remote(args) => remote::remote(ctx, args),
         Fetch { remote } => remote::fetch(ctx, remote),
         Pull { remote, branch, ff_only } => remote::pull(ctx, remote, branch, ff_only),
-        Push { .. } => remote::push(ctx),
+        Push(args) => remote::push(ctx, args),
+        Sync { push } => remote::sync(ctx, push),
         Undo { op, force, dry_run, what } => safety::undo(ctx, op, force, dry_run, what),
         Redo { force } => safety::redo(ctx, force),
         Op(args) => safety::op(ctx, args.command),
+        Stash(args) => stash::stash(ctx, args),
+        Shelve { message, include_untracked } => {
+            stash::run(ctx, crate::cli::StashCommand::Push { message, include_untracked, keep_index: false })
+        }
+        Unshelve { entry } => stash::run(ctx, crate::cli::StashCommand::Pop { entry, index: false }),
         Checkpoint(args) => safety::checkpoint(ctx, args),
         Explain { command } => crate::explain::run(ctx, &command),
         Doctor => tools::doctor(ctx),

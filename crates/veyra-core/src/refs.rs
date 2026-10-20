@@ -203,3 +203,60 @@ impl Repo {
         Ok(None)
     }
 }
+
+impl Repo {
+    /// Rename a branch like `git branch -m`: the new branch inherits the old one's reflog, and
+    /// `HEAD` follows if it pointed at the old branch.
+    pub fn rename_branch(&self, old_full: &str, new_full: &str) -> Result<()> {
+        let target = self.ref_target(old_full)?.with_context(|| format!("branch '{}' not found", shorten(old_full)))?;
+        if self.ref_target(new_full)?.is_some() {
+            bail!("a branch named '{}' already exists", shorten(new_full));
+        }
+        let logs = self.common_dir().join("logs");
+        let old_log = std::fs::read(logs.join(old_full)).ok();
+        let msg = format!("Branch: renamed {old_full} to {new_full}");
+        self.set_ref(new_full, target, Some(None), &msg)?;
+        if let Some(old) = old_log {
+            // Keep the history: old entries first, then the rename entry gix just wrote.
+            let new_path = logs.join(new_full);
+            let created = std::fs::read(&new_path).unwrap_or_default();
+            let mut merged = old;
+            merged.extend_from_slice(&created);
+            if let Some(parent) = new_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&new_path, merged)?;
+        }
+        let head_follows = matches!(self.head_state()?, crate::HeadState::Branch { ref name, .. } if name == old_full);
+        if head_follows {
+            self.set_head_symbolic(new_full, &msg)?;
+        }
+        self.delete_ref(old_full, Some(target))?;
+        // Upstream configuration moves with the branch.
+        let (old_short, new_short) = (shorten(old_full).to_owned(), shorten(new_full).to_owned());
+        let config = self.config_path(crate::config::Scope::Local)?;
+        for key in ["remote", "merge", "pushRemote", "rebase"] {
+            if let Some(v) = self.config_get(&format!("branch.{old_short}.{key}")) {
+                crate::config::set_in_file(&config, &format!("branch.{new_short}.{key}"), &v)?;
+            }
+        }
+        crate::config::remove_section_in_file(&config, "branch", Some(&old_short))?;
+        Ok(())
+    }
+}
+
+impl Repo {
+    /// How many commits `a` has that `b` doesn't (ahead), and vice versa (behind).
+    pub fn ahead_behind(&self, a: ObjectId, b: ObjectId) -> Result<(usize, usize)> {
+        let count = |from: ObjectId, hide: ObjectId| -> Result<usize> {
+            let walk = self.git.rev_walk([from]).with_hidden([hide]).all()?;
+            let mut n = 0;
+            for info in walk {
+                info.map_err(|e| anyhow!("history traversal failed: {e}"))?;
+                n += 1;
+            }
+            Ok(n)
+        };
+        Ok((count(a, b)?, count(b, a)?))
+    }
+}

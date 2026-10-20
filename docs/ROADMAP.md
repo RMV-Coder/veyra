@@ -27,15 +27,26 @@ journal has to wrap every mutating command from the start.
 Known gaps carried forward: push, stash, rebase, cherry-pick, revert, hooks, commit signing,
 `add -p`, `log --graph`, blame, submodule writes, sparse checkout writes, SHA-256 repositories.
 
-## Phase 2 — Everyday Git parity
+## Phase 2 — Everyday Git parity (in progress)
 
-- `veyra push` on `gix-protocol` (send-pack over HTTP(S)/SSH, `--force-with-lease`, journaled so
-  undo can warn about pushed commits, B10), then upstream it to gitoxide
-- `stash` / `shelve` compatible with `refs/stash`; `clean` with checkpoint-first
-- `rebase` (incl. `-i`), `cherry-pick`, `revert`, `blame`, `log --graph`, `add -p`
-- Git hooks (`pre-commit`, `commit-msg`, …) with Git for Windows' `sh` discovery
-- `branch graph / cleanup --dry-run / compare / explain`, `sync`
-- CI on Linux, macOS and Windows; a published compatibility matrix
+- [x] `veyra push` on gitoxide's transport and handshake: the receive-pack protocol, `-u`, `--tags`,
+      `--delete`, `+refspec`, `--force`, `--force-with-lease`, `--dry-run`, credential helpers. Journaled,
+      and `veyra undo` refuses to silently unpublish pushed commits (B10).
+- [x] `stash` / `shelve` / `unshelve`, compatible with `refs/stash` and its reflog
+- [x] `clean`, with checkpoint-first
+- [x] `cherry-pick`, `revert`, `rebase` and `rebase -i` (pick/reword/edit/squash/fixup/drop and
+      reordering), with Git-compatible conflict state
+- [x] `blame`, `log --graph`
+- [x] Git hooks (`pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, `pre-push`,
+      `post-checkout`, `post-merge`), with Git for Windows' `sh` discovery and a trust check
+- [x] `branch -m` keeps the reflog and upstream configuration
+- [ ] Delta-compressed packs for push (gix-pack's output pipeline)
+- [x] `add -p` (per-hunk y/n/q/a/d)
+- [ ] Hunk split/edit in `add -p`; `exec`/`break` in `rebase -i`
+- [x] `branch cleanup [--dry-run]`, `branch compare`, `sync [--push]`
+- [ ] `branch graph`, `branch explain`
+- [ ] CI on Linux, macOS and Windows (the workflow exists but is blocked on account billing), and a
+      published compatibility matrix
 
 **Exit criterion:** a developer can use Veyra full-time on a GitHub project without falling back
 to `git`, and the conformance suite covers every Phase 1–2 command on all three platforms.

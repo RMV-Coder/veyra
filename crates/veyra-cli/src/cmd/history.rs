@@ -102,6 +102,32 @@ pub fn log(ctx: &Ctx, args: LogArgs) -> Result<()> {
         return Ok(());
     }
 
+    if args.graph {
+        let commits = repo.topo_log(&tips, args.max_count)?;
+        let decor = decorations(&repo)?;
+        for row in veyra_core::annotate::render_graph(&commits) {
+            match row {
+                veyra_core::annotate::GraphRow::Edge(edge) => anstream::println!("{}", ui::red(&edge)),
+                veyra_core::annotate::GraphRow::Commit { prefix, index } => {
+                    let c = &commits[index];
+                    let labels = decor
+                        .get(&c.id)
+                        .filter(|l| !l.is_empty())
+                        .map(|l| format!(" ({})", l.join(", ")))
+                        .unwrap_or_default();
+                    anstream::println!(
+                        "{}{}{} {}",
+                        ui::red(&prefix),
+                        ui::yellow(&veyra_core::short(&c.id)),
+                        ui::yellow(&labels),
+                        c.summary()
+                    );
+                }
+            }
+        }
+        return Ok(());
+    }
+
     let decor = decorations(&repo)?;
     let deco = |id: &ObjectId| -> String {
         match decor.get(id) {
@@ -246,5 +272,57 @@ pub fn show(ctx: &Ctx, revision: Option<String>, stat: bool) -> Result<()> {
     let changes = flat::diff(&parent, &repo.flat_from_tree(c.tree)?);
     let diffs = repo.diff_changes(&changes, NewSide::Objects, 3)?;
     print_diffs(&repo, &diffs, stat, false, false);
+    Ok(())
+}
+
+pub fn blame(ctx: &Ctx, file: &str, rev: Option<String>, lines: Option<String>) -> Result<()> {
+    let repo = ctx.repo()?;
+    let path = repo.to_repo_path(&ctx.cwd, file)?;
+    let commit = repo.rev_parse_commit(rev.as_deref().unwrap_or("HEAD"))?;
+    let range = match lines {
+        Some(spec) => {
+            let (a, b) = spec.split_once(',').unwrap_or((spec.as_str(), spec.as_str()));
+            let start: usize = a.trim().parse().map_err(|_| anyhow::anyhow!("invalid -L range '{spec}'"))?;
+            let end: usize = b.trim().parse().map_err(|_| anyhow::anyhow!("invalid -L range '{spec}'"))?;
+            Some((start.max(1), end.max(start)))
+        }
+        None => None,
+    };
+    let blamed = repo.blame(path.as_ref(), commit)?;
+    let shown: Vec<_> = blamed.iter().filter(|l| range.is_none_or(|(a, b)| l.line >= a && l.line <= b)).collect();
+    if ctx.json {
+        ui::json(&json!(
+            shown
+                .iter()
+                .map(|l| json!({
+                    "line": l.line, "commit": l.commit.to_string(), "author": l.author, "time": l.time,
+                    "source_path": l.source_path, "text": l.text,
+                }))
+                .collect::<Vec<_>>()
+        ));
+        return Ok(());
+    }
+    let author_width = shown.iter().map(|l| l.author.chars().count()).max().unwrap_or(0).min(20);
+    let line_width = shown.last().map(|l| l.line.to_string().len()).unwrap_or(1);
+    for l in shown {
+        let date = jiff::Timestamp::from_second(l.time)
+            .ok()
+            .and_then(|t| {
+                jiff::tz::Offset::from_seconds(l.offset)
+                    .ok()
+                    .map(|o| t.to_zoned(o.to_time_zone()).strftime("%Y-%m-%d").to_string())
+            })
+            .unwrap_or_default();
+        let author: String = l.author.chars().take(author_width).collect();
+        let renamed = l.source_path.as_ref().map(|p| format!(" {p}")).unwrap_or_default();
+        anstream::println!(
+            "{}{} ({:<author_width$} {date} {:>line_width$}) {}",
+            ui::yellow(&veyra_core::short(&l.commit)),
+            ui::dim(&renamed),
+            author,
+            l.line,
+            l.text
+        );
+    }
     Ok(())
 }
