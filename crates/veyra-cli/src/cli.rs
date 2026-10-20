@@ -454,6 +454,10 @@ pub enum BranchCommand {
     },
     /// Rename a branch.
     Rename { old: String, new: String },
+    /// Show how branches relate (by commit ancestry, not by name).
+    Graph,
+    /// Explain a branch: its base, how far it diverged, what it touches, and likely conflicts.
+    Explain { name: Option<String> },
     /// Delete local branches that are fully merged into the default branch (undoable).
     Cleanup {
         /// Only list what would be deleted.

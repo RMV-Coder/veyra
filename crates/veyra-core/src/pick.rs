@@ -72,6 +72,10 @@ pub enum RebaseAction {
     Fixup,
     /// Leave the commit out.
     Drop,
+    /// Run a shell command; a failure stops the rebase.
+    Exec,
+    /// Stop here (resume with `rebase --continue`).
+    Break,
 }
 
 impl RebaseAction {
@@ -83,6 +87,8 @@ impl RebaseAction {
             RebaseAction::Squash => "squash",
             RebaseAction::Fixup => "fixup",
             RebaseAction::Drop => "drop",
+            RebaseAction::Exec => "exec",
+            RebaseAction::Break => "break",
         }
     }
 
@@ -95,16 +101,35 @@ impl RebaseAction {
             "squash" | "s" => RebaseAction::Squash,
             "fixup" | "f" => RebaseAction::Fixup,
             "drop" | "d" => RebaseAction::Drop,
+            "exec" | "x" => RebaseAction::Exec,
+            "break" | "b" => RebaseAction::Break,
             _ => return None,
         })
     }
 }
 
 /// One line of a rebase plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebaseStep {
     pub action: RebaseAction,
+    /// The commit to replay (the null id for `exec` and `break`).
     pub commit: ObjectId,
+    /// The shell command of an `exec` step.
+    pub command: Option<String>,
+}
+
+impl RebaseStep {
+    pub fn new(action: RebaseAction, commit: ObjectId) -> Self {
+        RebaseStep { action, commit, command: None }
+    }
+
+    fn to_line(&self) -> String {
+        match self.action {
+            RebaseAction::Exec => format!("exec {}", self.command.as_deref().unwrap_or_default()),
+            RebaseAction::Break => "break".into(),
+            a => format!("{} {}", a.name(), self.commit),
+        }
+    }
 }
 
 /// Persisted state of a rebase that stopped (conflict or `edit`).
@@ -126,11 +151,11 @@ impl RebaseState {
         s.push_str(&format!("branch {}\n", self.branch.as_deref().unwrap_or("-")));
         s.push_str(&format!("orig-head {}\n", self.orig_head));
         s.push_str(&format!("onto {}\n", self.onto));
-        if let Some(c) = self.current {
-            s.push_str(&format!("current {} {}\n", c.action.name(), c.commit));
+        if let Some(c) = &self.current {
+            s.push_str(&format!("current {}\n", c.to_line()));
         }
         for t in &self.todo {
-            s.push_str(&format!("{} {}\n", t.action.name(), t.commit));
+            s.push_str(&format!("{}\n", t.to_line()));
         }
         s
     }
@@ -138,14 +163,22 @@ impl RebaseState {
     fn from_text(text: &str) -> Result<RebaseState> {
         let parse =
             |hex: &str| ObjectId::from_hex(hex.trim().as_bytes()).map_err(|e| anyhow!("corrupt rebase state: {e}"));
+        let null = ObjectId::null(gix::hash::Kind::Sha1);
         let step = |value: &str| -> Result<RebaseStep> {
+            if value == "break" {
+                return Ok(RebaseStep::new(RebaseAction::Break, null));
+            }
+            if let Some(cmd) = value.strip_prefix("exec ") {
+                return Ok(RebaseStep { action: RebaseAction::Exec, commit: null, command: Some(cmd.to_owned()) });
+            }
             match value.split_once(' ') {
                 Some((verb, hex)) => Ok(RebaseStep {
+                    command: None,
                     action: RebaseAction::parse(verb)
                         .with_context(|| format!("corrupt rebase state: unknown action {verb}"))?,
                     commit: parse(hex)?,
                 }),
-                None => Ok(RebaseStep { action: RebaseAction::Pick, commit: parse(value)? }),
+                None => Ok(RebaseStep::new(RebaseAction::Pick, parse(value)?)),
             }
         };
         let (mut branch, mut orig, mut onto, mut current, mut todo) = (None, None, None, None, Vec::new());
@@ -157,9 +190,13 @@ impl RebaseState {
                 "orig-head" => orig = Some(parse(value)?),
                 "onto" => onto = Some(parse(value)?),
                 "current" => current = Some(step(value)?),
+                "break" => todo.push(RebaseStep::new(RebaseAction::Break, null)),
+                "exec" => {
+                    todo.push(RebaseStep { action: RebaseAction::Exec, commit: null, command: Some(value.to_owned()) })
+                }
                 verb => {
                     if let Some(action) = RebaseAction::parse(verb) {
-                        todo.push(RebaseStep { action, commit: parse(value)? });
+                        todo.push(RebaseStep::new(action, parse(value)?));
                     }
                 }
             }
@@ -195,6 +232,17 @@ pub enum RebaseOutcome {
         commit: ObjectId,
         remaining: usize,
     },
+    /// Stopped at a `break` step.
+    Break {
+        at: ObjectId,
+        remaining: usize,
+    },
+    /// An `exec` step failed; fix things, then `rebase --continue`.
+    ExecFailed {
+        command: String,
+        error: String,
+        remaining: usize,
+    },
 }
 
 /// Edits a commit message during `reword` and `squash` (the CLI opens an editor).
@@ -208,16 +256,37 @@ pub fn parse_todo(repo: &Repo, text: &str) -> Result<Vec<RebaseStep>> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let mut words = line.split_whitespace();
-        let verb = words.next().unwrap_or_default();
+        let (verb, rest) = line.split_once(char::is_whitespace).map(|(v, r)| (v, r.trim())).unwrap_or((line, ""));
         let action = RebaseAction::parse(verb).with_context(|| {
-            format!("line {}: unknown action '{verb}' (use pick, reword, edit, squash, fixup or drop)", n + 1)
+            format!(
+                "line {}: unknown action '{verb}' (use pick, reword, edit, squash, fixup, drop, exec or break)",
+                n + 1
+            )
         })?;
-        let id = words.next().with_context(|| format!("line {}: missing commit", n + 1))?;
+        match action {
+            RebaseAction::Exec => {
+                if rest.is_empty() {
+                    bail!("line {}: exec needs a command", n + 1);
+                }
+                out.push(RebaseStep {
+                    action,
+                    commit: ObjectId::null(repo.object_hash()),
+                    command: Some(rest.to_owned()),
+                });
+                continue;
+            }
+            RebaseAction::Break => {
+                out.push(RebaseStep::new(action, ObjectId::null(repo.object_hash())));
+                continue;
+            }
+            _ => {}
+        }
+        let id = rest.split_whitespace().next().with_context(|| format!("line {}: missing commit", n + 1))?;
         let commit = repo.rev_parse_commit(id).with_context(|| format!("line {}", n + 1))?;
-        out.push(RebaseStep { action, commit });
+        out.push(RebaseStep::new(action, commit));
     }
-    if let Some(first) = out.iter().find(|s| s.action != RebaseAction::Drop)
+    if let Some(first) =
+        out.iter().find(|s| !matches!(s.action, RebaseAction::Drop | RebaseAction::Exec | RebaseAction::Break))
         && matches!(first.action, RebaseAction::Squash | RebaseAction::Fixup)
     {
         bail!("cannot '{}' without a previous commit", first.action.name());
@@ -449,7 +518,7 @@ impl Repo {
             None => self
                 .commits_to_replay(upstream)?
                 .into_iter()
-                .map(|commit| RebaseStep { action: RebaseAction::Pick, commit })
+                .map(|commit| RebaseStep::new(RebaseAction::Pick, commit))
                 .collect(),
         };
         // Already based on `onto`: nothing to replay (like git's "Current branch is up to date").
@@ -477,14 +546,34 @@ impl Repo {
     ) -> Result<RebaseOutcome> {
         while !state.todo.is_empty() {
             let step = state.todo.remove(0);
-            if step.action == RebaseAction::Drop {
-                skipped += 1;
-                continue;
+            match step.action {
+                RebaseAction::Drop => {
+                    skipped += 1;
+                    continue;
+                }
+                RebaseAction::Break => {
+                    self.save_rebase_state(&state)?;
+                    let head = self.head_commit_id()?.unwrap_or(state.onto);
+                    return Ok(RebaseOutcome::Break { at: head, remaining: state.todo.len() });
+                }
+                RebaseAction::Exec => {
+                    let command = step.command.clone().unwrap_or_default();
+                    if let Err(err) = self.run_exec(&command) {
+                        self.save_rebase_state(&state)?;
+                        return Ok(RebaseOutcome::ExecFailed {
+                            command,
+                            error: err.to_string(),
+                            remaining: state.todo.len(),
+                        });
+                    }
+                    continue;
+                }
+                _ => {}
             }
             match self.pick(PickKind::CherryPick, step.commit, &PickOptions::default())? {
                 PickOutcome::Committed(_) => {
                     picked += 1;
-                    self.after_rebase_pick(step, editor)?;
+                    self.after_rebase_pick(&step, editor)?;
                     if step.action == RebaseAction::Edit {
                         self.save_rebase_state(&state)?;
                         return Ok(RebaseOutcome::Edit { commit: step.commit, remaining: state.todo.len() });
@@ -493,10 +582,11 @@ impl Repo {
                 PickOutcome::Empty => skipped += 1,
                 PickOutcome::Applied => unreachable!("rebase always commits"),
                 PickOutcome::Conflicts(paths) => {
+                    let commit = step.commit;
                     state.current = Some(step);
                     let remaining = state.todo.len();
                     self.save_rebase_state(&state)?;
-                    return Ok(RebaseOutcome::Stopped { commit: step.commit, paths, remaining });
+                    return Ok(RebaseOutcome::Stopped { commit, paths, remaining });
                 }
             }
         }
@@ -516,7 +606,21 @@ impl Repo {
     }
 
     /// Apply `reword`, `squash` and `fixup` to the commit that was just picked (HEAD).
-    fn after_rebase_pick(&self, step: RebaseStep, editor: MessageEditor<'_>) -> Result<()> {
+    /// Run an `exec` step's command through the shell, from the worktree root.
+    fn run_exec(&self, command: &str) -> Result<()> {
+        let mut cmd = gix::path::env::shell_command();
+        cmd.arg("-c").arg(command).current_dir(self.workdir()?);
+        let status = cmd.status().with_context(|| format!("could not run `{command}`"))?;
+        if !status.success() {
+            bail!(
+                "`{command}` failed ({})",
+                status.code().map(|c| format!("exit code {c}")).unwrap_or_else(|| "killed".into())
+            );
+        }
+        Ok(())
+    }
+
+    fn after_rebase_pick(&self, step: &RebaseStep, editor: MessageEditor<'_>) -> Result<()> {
         let head = self.head_commit_id()?.context("rebase lost HEAD")?;
         let picked = self.git.find_commit(head)?;
         let info = self.commit_info(head)?;
@@ -627,8 +731,8 @@ impl Repo {
                 } else {
                     self.continue_pick(None)?;
                     picked += 1;
-                    if let Some(step) = state.current {
-                        self.after_rebase_pick(step, editor)?;
+                    if let Some(step) = state.current.clone() {
+                        self.after_rebase_pick(&step, editor)?;
                         if step.action == RebaseAction::Edit {
                             state.current = None;
                             self.save_rebase_state(&state)?;
@@ -651,13 +755,22 @@ mod tests {
     fn rebase_state_round_trips() {
         let a = ObjectId::from_hex(b"1111111111111111111111111111111111111111").unwrap();
         let b = ObjectId::from_hex(b"2222222222222222222222222222222222222222").unwrap();
-        let pick = |commit| RebaseStep { action: RebaseAction::Pick, commit };
+        let pick = |commit| RebaseStep::new(RebaseAction::Pick, commit);
         let state = RebaseState {
             branch: Some("refs/heads/topic".into()),
             orig_head: a,
             onto: b,
-            todo: vec![pick(a), RebaseStep { action: RebaseAction::Squash, commit: b }],
-            current: Some(RebaseStep { action: RebaseAction::Reword, commit: b }),
+            todo: vec![
+                pick(a),
+                RebaseStep::new(RebaseAction::Squash, b),
+                RebaseStep {
+                    action: RebaseAction::Exec,
+                    commit: ObjectId::null(gix::hash::Kind::Sha1),
+                    command: Some("cargo test --quiet".into()),
+                },
+                RebaseStep::new(RebaseAction::Break, ObjectId::null(gix::hash::Kind::Sha1)),
+            ],
+            current: Some(RebaseStep::new(RebaseAction::Reword, b)),
         };
         assert_eq!(RebaseState::from_text(&state.to_text()).unwrap(), state);
         let detached = RebaseState { branch: None, current: None, todo: vec![], ..state };

@@ -148,6 +148,21 @@ pub fn rebase(
                 plural(remaining, "commit")
             );
         }
+        RebaseOutcome::Break { at, remaining } => {
+            anstream::println!(
+                "Stopped at {} (break). `veyra rebase --continue` resumes ({} left).",
+                veyra_core::short(&at),
+                plural(remaining, "step")
+            );
+        }
+        RebaseOutcome::ExecFailed { command, error, remaining } => {
+            anstream::println!("{error}");
+            anstream::println!(
+                "The rebase stopped after `{command}`. Fix things (amend if needed), then `veyra rebase --continue` ({} left).",
+                plural(remaining, "step")
+            );
+            return Err(Reported.into());
+        }
         RebaseOutcome::Stopped { commit, paths, remaining } => {
             let info = repo.commit_info(commit)?;
             anstream::println!("Could not apply {} {}", veyra_core::short(&commit), info.summary());
@@ -173,6 +188,8 @@ fn describe(o: &RebaseOutcome) -> String {
         }
         RebaseOutcome::Stopped { commit, .. } => format!("rebase: stopped at {}", veyra_core::short(commit)),
         RebaseOutcome::Edit { commit, .. } => format!("rebase: stopped to edit {}", veyra_core::short(commit)),
+        RebaseOutcome::Break { at, .. } => format!("rebase: break at {}", veyra_core::short(at)),
+        RebaseOutcome::ExecFailed { command, .. } => format!("rebase: exec failed: {command}"),
     }
 }
 
@@ -184,6 +201,8 @@ const TODO_HELP: &str = "
 # s, squash <commit> = use commit, but meld into previous commit
 # f, fixup <commit>  = like \"squash\", but keep only the previous commit's message
 # d, drop <commit>   = remove commit
+# x, exec <command>  = run command (the rest of the line) using shell
+# b, break           = stop here (continue rebase later with 'veyra rebase --continue')
 #
 # Lines can be re-ordered; they are executed from top to bottom.
 # Removing every line aborts the rebase. `veyra undo` reverts a finished rebase.

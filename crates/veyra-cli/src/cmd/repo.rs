@@ -490,7 +490,7 @@ pub fn add_patch(ctx: &Ctx, paths: Vec<String>) -> Result<()> {
             _ => "q".into(), // end of input = quit, keeping what was chosen
         }
     };
-    const HELP: &str = "y - stage this hunk\nn - do not stage this hunk\nq - quit; do not stage this hunk or any remaining ones\na - stage this hunk and all later hunks in the file\nd - do not stage this hunk or any later hunks in the file\n? - print help\n(splitting and editing hunks are not supported yet)\n";
+    const HELP: &str = "y - stage this hunk\nn - do not stage this hunk\nq - quit; do not stage this hunk or any remaining ones\na - stage this hunk and all later hunks in the file\nd - do not stage this hunk or any later hunks in the file\ns - split the current hunk into smaller hunks\n? - print help\n(editing hunks is not supported yet)\n";
 
     let staged = journal(ctx, &repo, "add", false, || {
         let mut staged = 0usize;
@@ -524,23 +524,33 @@ pub fn add_patch(ctx: &Ctx, paths: Vec<String>) -> Result<()> {
                     }
                 },
                 FilePatch::Text { path: p, index, worktree, hunks } => {
-                    let mut accepted = vec![false; hunks.len()];
+                    let mut queue: Vec<veyra_core::patch::Hunk> = hunks.clone();
+                    let mut accepted: std::collections::HashSet<(usize, usize)> = Default::default();
                     let mut quit = false;
                     let mut i = 0;
-                    while i < hunks.len() {
+                    while i < queue.len() {
+                        let hunk = queue[i].clone();
                         anstream::println!("{}", ui::bold(&format!("diff --git a/{path} b/{path}")));
-                        anstream::print!("{}", ui::colour_diff(&hunks[i].text));
-                        match ask(&format!("({}/{}) Stage this hunk [y,n,q,a,d,?]? ", i + 1, hunks.len())).as_str() {
+                        anstream::print!("{}", ui::colour_diff(&hunk.text));
+                        let options = if hunk.can_split() { "y,n,q,a,d,s,?" } else { "y,n,q,a,d,?" };
+                        match ask(&format!("({}/{}) Stage this hunk [{options}]? ", i + 1, queue.len())).as_str() {
                             "y" => {
-                                accepted[i] = true;
+                                accepted.extend(hunk.changes.iter().copied());
                                 i += 1;
                             }
                             "n" => i += 1,
                             "a" => {
-                                accepted[i..].iter_mut().for_each(|a| *a = true);
+                                for h in &queue[i..] {
+                                    accepted.extend(h.changes.iter().copied());
+                                }
                                 break;
                             }
                             "d" => break,
+                            "s" if hunk.can_split() => {
+                                let parts = veyra_core::patch::split(index, worktree, &hunk);
+                                anstream::println!("Split into {} hunks.", parts.len());
+                                queue.splice(i..=i, parts);
+                            }
                             "q" => {
                                 quit = true;
                                 break;
@@ -548,10 +558,10 @@ pub fn add_patch(ctx: &Ctx, paths: Vec<String>) -> Result<()> {
                             _ => anstream::print!("{HELP}"),
                         }
                     }
-                    if accepted.iter().any(|a| *a) {
+                    if !accepted.is_empty() {
                         let content = veyra_core::patch::apply(index, worktree, &accepted);
                         repo.stage_content(p, content.as_bytes())?;
-                        staged += accepted.iter().filter(|a| **a).count();
+                        staged += accepted.len();
                     }
                     if quit {
                         break 'files;
@@ -559,8 +569,8 @@ pub fn add_patch(ctx: &Ctx, paths: Vec<String>) -> Result<()> {
                 }
             }
         }
-        Ok((staged, format!("stage {} interactively", plural(staged, "hunk"))))
+        Ok((staged, format!("stage {} interactively", plural(staged, "change"))))
     })?;
-    anstream::println!("Staged {}.", plural(staged, "hunk"));
+    anstream::println!("Staged {}.", plural(staged, "change"));
     Ok(())
 }

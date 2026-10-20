@@ -202,3 +202,85 @@ impl Repo {
         Ok(id)
     }
 }
+
+/// One node of the branch tree (`veyra branch graph`).
+#[derive(Debug, Clone)]
+pub struct BranchNode {
+    pub name: String,
+    pub tip: ObjectId,
+    /// The branch it was forked from, by commit ancestry (`None` for the root).
+    pub parent: Option<String>,
+    /// Commits ahead of / behind the parent.
+    pub ahead: usize,
+    pub behind: usize,
+}
+
+impl Repo {
+    /// Conflicting paths a merge of `theirs` into `ours` would produce, computed entirely in
+    /// memory: nothing is written to the object database or the worktree.
+    pub fn merge_preview(&self, ours: ObjectId, theirs: ObjectId) -> Result<Vec<BString>> {
+        let scratch = gix::open(self.git_dir())?.with_object_memory();
+        let labels = gix::merge::blob::builtin_driver::text::Labels { ancestor: None, current: None, other: None };
+        let options: gix::merge::commit::Options = scratch.tree_merge_options()?.into();
+        let outcome =
+            scratch.merge_commits(ours, theirs, labels, options).map_err(|e| anyhow!("merge preview failed: {e}"))?;
+        let how = gix::merge::tree::TreatAsUnresolved::git();
+        let mut paths: Vec<BString> = outcome
+            .tree_merge
+            .conflicts
+            .iter()
+            .filter(|c| c.is_unresolved(how))
+            .map(|c| c.ours.location().to_owned())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    /// Local branches arranged by ancestry: a branch's parent is the branch it shares the most
+    /// recent history with beyond what both share with the root (the default branch).
+    pub fn branch_tree(&self) -> Result<Vec<BranchNode>> {
+        let branches = self.branches(false)?;
+        let root = self.default_branch()?.or_else(|| branches.first().map(|b| b.name.clone()));
+        let Some(root) = root else { return Ok(Vec::new()) };
+        let tips: Vec<(String, ObjectId)> = branches.iter().map(|b| (b.name.clone(), b.target)).collect();
+        let root_tip = tips.iter().find(|(n, _)| *n == root).map(|(_, t)| *t);
+        let merge_base = |a: ObjectId, b: ObjectId| self.git.merge_base(a, b).ok().flatten().map(|m| m.detach());
+        let time = |id: ObjectId| self.commit_info(id).map(|c| c.committer_time).unwrap_or(0);
+
+        let mut out = Vec::new();
+        for (name, tip) in &tips {
+            if *name == root {
+                out.push(BranchNode { name: name.clone(), tip: *tip, parent: None, ahead: 0, behind: 0 });
+                continue;
+            }
+            let fork_root = root_tip.and_then(|r| merge_base(*tip, r));
+            let mut parent: Option<(String, ObjectId, i64)> = None;
+            for (other, other_tip) in &tips {
+                if other == name || *other == root {
+                    continue;
+                }
+                let Some(fork) = merge_base(*tip, *other_tip) else { continue };
+                // B fully contained in X means B is behind X, not branched from it.
+                if fork == *tip {
+                    continue;
+                }
+                // Only a parent if B shares strictly more history with X than with the root.
+                let deeper = match fork_root {
+                    Some(fr) => fr != fork && self.is_ancestor(fr, fork).unwrap_or(false),
+                    None => true,
+                };
+                if deeper && parent.as_ref().is_none_or(|(_, _, t)| time(fork) > *t) {
+                    parent = Some((other.clone(), *other_tip, time(fork)));
+                }
+            }
+            let (parent_name, parent_tip) = match parent {
+                Some((n, t, _)) => (n, t),
+                None => (root.clone(), root_tip.unwrap_or(*tip)),
+            };
+            let (ahead, behind) = self.ahead_behind(*tip, parent_tip)?;
+            out.push(BranchNode { name: name.clone(), tip: *tip, parent: Some(parent_name), ahead, behind });
+        }
+        Ok(out)
+    }
+}

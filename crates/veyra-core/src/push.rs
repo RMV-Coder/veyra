@@ -14,7 +14,7 @@
 //! The packfile is written without deltas for now (correct, but larger than Git's). Delta
 //! compression via `gix-pack`'s output pipeline is a planned optimisation.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -84,6 +84,8 @@ pub struct PushOutcome {
     pub results: Vec<RefResult>,
     pub objects_sent: usize,
     pub pack_bytes: u64,
+    /// How many objects were sent as deltas.
+    pub deltas: usize,
 }
 
 impl PushOutcome {
@@ -118,14 +120,55 @@ pub fn pkt_line(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Write a version-2 packfile containing `objects` (no deltas). Returns the bytes written.
+/// Which objects to send, and good delta bases for them.
+#[derive(Debug, Default)]
+pub struct PackPlan {
+    pub objects: Vec<ObjectId>,
+    /// Object → the previous version of the same path (a delta base candidate).
+    pub base_hints: HashMap<ObjectId, ObjectId>,
+    /// Objects the remote is known to have (usable as bases of a thin pack).
+    pub remote_has: HashSet<ObjectId>,
+}
+
+/// Blobs larger than this are sent whole (deltifying them costs too much memory and time).
+const MAX_DELTA_SOURCE: usize = 32 * 1024 * 1024;
+/// Longest allowed chain of deltas within one pack.
+const MAX_DELTA_DEPTH: u32 = 16;
+
+fn write_entry_header(w: &mut impl Write, type_code: u8, size: usize) -> std::io::Result<()> {
+    // Type in bits 4-6 of the first byte, size as a little-endian base-128 varint.
+    let mut size = size as u64;
+    let mut header = Vec::with_capacity(10);
+    let mut byte = (type_code << 4) | (size & 0x0f) as u8;
+    size >>= 4;
+    while size > 0 {
+        header.push(byte | 0x80);
+        byte = (size & 0x7f) as u8;
+        size >>= 7;
+    }
+    header.push(byte);
+    w.write_all(&header)
+}
+
+/// Write a version-2 packfile containing `objects` without deltas. Returns the bytes written.
 pub fn write_pack(repo: &Repo, objects: &[ObjectId], out: impl Write) -> Result<u64> {
+    let plan = PackPlan { objects: objects.to_vec(), ..Default::default() };
+    write_pack_with_deltas(repo, &plan, out).map(|(bytes, _)| bytes)
+}
+
+/// Write a version-2 packfile for `plan`, storing blobs as `REF_DELTA`s against their previous
+/// version when that is much smaller. Bases are either in this pack or on the remote (a "thin"
+/// pack, which receive-pack completes with `index-pack --fix-thin`). Returns (bytes, deltas).
+pub fn write_pack_with_deltas(repo: &Repo, plan: &PackPlan, out: impl Write) -> Result<(u64, usize)> {
     let mut w = HashingWriter { inner: out, hasher: gix::hash::hasher(repo.object_hash()), written: 0 };
     w.write_all(b"PACK")?;
     w.write_all(&2u32.to_be_bytes())?;
-    w.write_all(&(u32::try_from(objects.len()).context("too many objects for one pack")?).to_be_bytes())?;
+    w.write_all(&(u32::try_from(plan.objects.len()).context("too many objects for one pack")?).to_be_bytes())?;
     let level = repo.git.pack_compression().unwrap_or_default();
-    for id in objects {
+    let in_pack: HashSet<ObjectId> = plan.objects.iter().copied().collect();
+    let mut depth: HashMap<ObjectId, u32> = HashMap::new();
+    let mut deltas = 0usize;
+    for id in &plan.objects {
         let object = repo.git.find_object(*id).with_context(|| format!("object {id} is missing locally"))?;
         let type_code: u8 = match object.kind {
             gix::objs::Kind::Commit => 1,
@@ -133,33 +176,59 @@ pub fn write_pack(repo: &Repo, objects: &[ObjectId], out: impl Write) -> Result<
             gix::objs::Kind::Blob => 3,
             gix::objs::Kind::Tag => 4,
         };
-        // Object header: type in bits 4-6 of the first byte, size as a little-endian base-128 varint.
-        let mut size = object.data.len() as u64;
-        let mut header = Vec::with_capacity(10);
-        let mut byte = (type_code << 4) | (size & 0x0f) as u8;
-        size >>= 4;
-        while size > 0 {
-            header.push(byte | 0x80);
-            byte = (size & 0x7f) as u8;
-            size >>= 7;
+
+        // Try a delta against the hinted base.
+        let mut delta_entry: Option<(ObjectId, Vec<u8>)> = None;
+        if object.kind == gix::objs::Kind::Blob
+            && object.data.len() <= MAX_DELTA_SOURCE
+            && let Some(base_id) = plan.base_hints.get(id)
+            && (plan.remote_has.contains(base_id) || in_pack.contains(base_id))
+            && depth.get(base_id).copied().unwrap_or(0) < MAX_DELTA_DEPTH
+            && let Ok(base) = repo.git.find_object(*base_id)
+            && base.kind == gix::objs::Kind::Blob
+            && base.data.len() <= MAX_DELTA_SOURCE
+            && let Some(delta) = crate::delta::create(&base.data, &object.data)
+            && delta.len() < object.data.len() / 2
+        {
+            debug_assert_eq!(crate::delta::apply(&base.data, &delta).as_deref(), Some(&object.data[..]));
+            delta_entry = Some((*base_id, delta));
         }
-        header.push(byte);
-        w.write_all(&header)?;
-        let mut deflate = gix::zlib::stream::deflate::Write::new(&mut w, level);
-        deflate.write_all(&object.data)?;
-        deflate.flush()?;
-        drop(deflate);
+
+        match delta_entry {
+            Some((base_id, delta)) => {
+                write_entry_header(&mut w, 7, delta.len())?;
+                w.write_all(base_id.as_bytes())?;
+                let mut deflate = gix::zlib::stream::deflate::Write::new(&mut w, level);
+                deflate.write_all(&delta)?;
+                deflate.flush()?;
+                drop(deflate);
+                depth.insert(*id, depth.get(&base_id).copied().unwrap_or(0) + 1);
+                deltas += 1;
+            }
+            None => {
+                write_entry_header(&mut w, type_code, object.data.len())?;
+                let mut deflate = gix::zlib::stream::deflate::Write::new(&mut w, level);
+                deflate.write_all(&object.data)?;
+                deflate.flush()?;
+                drop(deflate);
+            }
+        }
     }
     let digest = std::mem::replace(&mut w.hasher, gix::hash::hasher(repo.object_hash())).try_finalize()?;
     w.inner.write_all(digest.as_bytes())?;
     w.inner.flush()?;
-    Ok(w.written + digest.as_bytes().len() as u64)
+    Ok((w.written + digest.as_bytes().len() as u64, deltas))
 }
 
 impl Repo {
     /// Objects reachable from `wants` that are not reachable from `haves` (approximated, like
     /// Git, by excluding everything in the trees of the boundary commits).
     pub fn objects_to_send(&self, wants: &[ObjectId], haves: &[ObjectId]) -> Result<Vec<ObjectId>> {
+        Ok(self.pack_plan(wants, haves)?.objects)
+    }
+
+    /// Like [`Repo::objects_to_send`], plus delta-base hints for the pack writer.
+    pub fn pack_plan(&self, wants: &[ObjectId], haves: &[ObjectId]) -> Result<PackPlan> {
         let mut out = Vec::new();
         let mut seen: HashSet<ObjectId> = HashSet::new();
 
@@ -188,7 +257,7 @@ impl Repo {
             }
         }
         if commit_wants.is_empty() {
-            return Ok(out);
+            return Ok(PackPlan { objects: out, ..Default::default() });
         }
 
         let hidden: Vec<ObjectId> = haves
@@ -216,7 +285,6 @@ impl Repo {
                 }
             }
         }
-        boundary.extend(hidden.iter().copied());
         boundary.sort();
         boundary.dedup();
         for b in boundary {
@@ -225,15 +293,35 @@ impl Repo {
             self.collect_tree_objects(tree, &mut known, &mut sink)?;
         }
 
-        seen.extend(known);
-        for c in new_commits {
-            if seen.insert(c) {
-                out.push(c);
+        seen.extend(known.iter().copied());
+        let mut base_hints = HashMap::new();
+        for c in &new_commits {
+            if seen.insert(*c) {
+                out.push(*c);
             }
-            let tree = self.commit_tree_id(c)?;
-            self.collect_tree_objects(tree, &mut seen, &mut out)?;
+            let info = self.commit_info(*c)?;
+            self.collect_tree_objects(info.tree, &mut seen, &mut out)?;
+            // The previous version of each changed path is a natural delta base.
+            if let Some(parent) = info.parents.first().filter(|p| self.git.has_object(*p)) {
+                let old_tree = self.git.find_tree(self.commit_tree_id(*parent)?)?;
+                let new_tree = self.git.find_tree(info.tree)?;
+                if let Ok(changes) = self.git.diff_tree_to_tree(Some(&old_tree), Some(&new_tree), None) {
+                    use gix::object::tree::diff::ChangeDetached as C;
+                    for change in changes {
+                        match change {
+                            C::Modification { previous_id, id, .. } => {
+                                base_hints.entry(id).or_insert(previous_id);
+                            }
+                            C::Rewrite { source_id, id, .. } => {
+                                base_hints.entry(id).or_insert(source_id);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
         }
-        Ok(out)
+        Ok(PackPlan { objects: out, base_hints, remote_has: known })
     }
 
     /// Add `tree` and everything below it to `out`, skipping objects already in `seen`.
@@ -389,6 +477,7 @@ impl Repo {
         }
 
         let mut outcome = PushOutcome {
+            deltas: 0,
             remote: remote_name.to_owned(),
             url: url_display.clone(),
             results,
@@ -418,7 +507,7 @@ impl Repo {
         // ---- objects --------------------------------------------------------------------
         let wants: Vec<ObjectId> = commands.iter().filter_map(|(_, new, _)| *new).collect();
         let haves: Vec<ObjectId> = remote_refs.values().copied().collect();
-        let objects = if wants.is_empty() { Vec::new() } else { self.objects_to_send(&wants, &haves)? };
+        let plan = if wants.is_empty() { PackPlan::default() } else { self.pack_plan(&wants, &haves)? };
 
         // ---- send -----------------------------------------------------------------------
         let null = ObjectId::null(self.object_hash());
@@ -445,8 +534,10 @@ impl Repo {
         }
         writer.write_all(b"0000")?;
         if !wants.is_empty() {
-            outcome.pack_bytes = write_pack(self, &objects, &mut writer)?;
-            outcome.objects_sent = objects.len();
+            let (bytes, deltas) = write_pack_with_deltas(self, &plan, &mut writer)?;
+            outcome.pack_bytes = bytes;
+            outcome.objects_sent = plan.objects.len();
+            outcome.deltas = deltas;
         }
         writer.flush()?;
         drop(writer);

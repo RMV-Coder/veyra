@@ -963,7 +963,7 @@ fn add_patch_stages_selected_hunks_only() {
         .write_stdin("y\nn\n")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Staged 1 hunk"));
+        .stdout(predicate::str::contains("Staged 1 change"));
     let staged = env.git(&["diff", "--cached"]);
     assert!(staged.contains("+A") && !staged.contains("+L"), "{staged}");
     let unstaged = env.git(&["diff"]);
@@ -1019,4 +1019,96 @@ fn sync_fast_forwards_or_rebases_onto_the_upstream() {
     env.ok(&["sync", "--push"]);
     assert_eq!(env.git(&["log", "--format=%s"]), "our commit\ntheir second\ntheir commit\nc1\n");
     assert_eq!(git_in(&env, &bare, &["log", "-1", "--format=%s", "main"]).trim(), "our commit");
+}
+
+#[test]
+fn interactive_rebase_exec_and_break() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "base\n", "base");
+    env.commit_file("one.txt", "1\n", "c1");
+    env.commit_file("two.txt", "2\n", "c2");
+
+    let seq = r#"sed -i -e '/ c1$/a exec echo ok > .git/exec-ran' -e '/ c2$/a break'"#;
+    env.veyra(&["rebase", "-i", "HEAD~2"])
+        .env("GIT_SEQUENCE_EDITOR", seq)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("break"));
+    assert!(env.repo.join(".git/exec-ran").exists(), "exec ran after c1");
+    assert!(env.ok(&["status"]).contains("rebasing"));
+    env.ok(&["rebase", "--continue"]);
+    assert_eq!(env.git(&["log", "--format=%s"]), "c2\nc1\nbase\n");
+
+    let failing = r#"sed -i -e '/ c1$/a exec exit 3'"#;
+    env.veyra(&["rebase", "-i", "HEAD~2"])
+        .env("GIT_SEQUENCE_EDITOR", failing)
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("exit code 3"));
+    env.ok(&["rebase", "--continue"]);
+    assert_eq!(env.git(&["log", "--format=%s"]), "c2\nc1\nbase\n");
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn incremental_pushes_send_deltas() {
+    require_git!();
+    let env = Env::new();
+    let bare = bare_origin(&env);
+    let big: String = (0..30_000).map(|i| format!("line number {i} of a large file\n")).collect();
+    env.commit_file("big.txt", &big, "big file");
+    env.ok(&["push", "-u", "--json"]);
+
+    let edited = big.replacen("line number 15000 ", "LINE NUMBER 15000 (edited) ", 1);
+    env.commit_file("big.txt", &edited, "small edit");
+    let out: serde_json::Value = serde_json::from_str(&env.ok(&["push", "--json"])).unwrap();
+    let bytes = out["bytes"].as_u64().unwrap();
+    assert!(bytes < 4_000, "an incremental push of a one-line edit should be tiny, was {bytes} bytes");
+    git_in(&env, &bare, &["fsck", "--strict", "--no-dangling"]);
+    assert_eq!(git_in(&env, &bare, &["show", "main:big.txt"]), edited, "the remote reconstructed the delta exactly");
+}
+
+#[test]
+fn branch_graph_and_explain() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "base\n", "base");
+    env.ok(&["switch", "-c", "feature/auth"]);
+    env.commit_file("auth/login.ts", "login\n", "auth");
+    env.ok(&["switch", "-c", "feature/auth-refresh"]);
+    env.commit_file("auth/refresh.ts", "refresh\n", "refresh");
+    env.ok(&["switch", "main"]);
+    env.ok(&["switch", "-c", "hotfix"]);
+    env.commit_file("a.txt", "hotfix\n", "hotfix");
+    env.ok(&["switch", "main"]);
+    env.commit_file("a.txt", "main moved\n", "main moved");
+
+    let graph: serde_json::Value = serde_json::from_str(&env.ok(&["branch", "graph", "--json"])).unwrap();
+    let parent_of = |b: &str| graph.as_array().unwrap().iter().find(|n| n["branch"] == b).unwrap()["parent"].clone();
+    assert_eq!(parent_of("feature/auth-refresh"), "feature/auth");
+    assert_eq!(parent_of("feature/auth"), "main");
+    assert_eq!(parent_of("hotfix"), "main");
+    let text = env.ok(&["branch", "graph"]);
+    assert!(text.contains("└── feature/auth-refresh") || text.contains("├── feature/auth-refresh"), "{text}");
+
+    let ex: serde_json::Value = serde_json::from_str(&env.ok(&["branch", "explain", "hotfix", "--json"])).unwrap();
+    assert_eq!(ex["base"], "main");
+    assert_eq!((ex["ahead"].as_u64(), ex["behind"].as_u64()), (Some(1), Some(1)));
+    assert_eq!(ex["conflicts"], serde_json::json!(["a.txt"]), "in-memory merge preview finds the conflict");
+    assert_eq!(env.git(&["status", "--porcelain"]), "", "the preview wrote nothing");
+    let ex2: serde_json::Value =
+        serde_json::from_str(&env.ok(&["branch", "explain", "feature/auth", "--json"])).unwrap();
+    assert_eq!(ex2["areas"]["auth"], 1);
+}
+
+#[test]
+fn add_patch_can_split_a_hunk() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "1\n2\n3\n4\n5\n", "c1");
+    env.write("a.txt", "1\nTWO\n3\nFOUR\n5\n");
+    assert_cmd::Command::from_std(env.veyra(&["add", "-p"])).write_stdin("s\nn\ny\n").assert().success();
+    let staged = env.git(&["diff", "--cached"]);
+    assert!(staged.contains("+FOUR") && !staged.contains("+TWO"), "{staged}");
 }

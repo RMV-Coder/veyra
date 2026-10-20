@@ -13,6 +13,7 @@ pub mod annotate;
 pub mod checkout;
 pub mod commit;
 pub mod config;
+pub mod delta;
 pub mod diff;
 pub mod flat;
 pub mod hooks;

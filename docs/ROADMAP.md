@@ -27,7 +27,7 @@ journal has to wrap every mutating command from the start.
 Known gaps carried forward: push, stash, rebase, cherry-pick, revert, hooks, commit signing,
 `add -p`, `log --graph`, blame, submodule writes, sparse checkout writes, SHA-256 repositories.
 
-## Phase 2 — Everyday Git parity (in progress)
+## Phase 2 — Everyday Git parity ✅
 
 - [x] `veyra push` on gitoxide's transport and handshake: the receive-pack protocol, `-u`, `--tags`,
       `--delete`, `+refspec`, `--force`, `--force-with-lease`, `--dry-run`, credential helpers. Journaled,
@@ -40,11 +40,10 @@ Known gaps carried forward: push, stash, rebase, cherry-pick, revert, hooks, com
 - [x] Git hooks (`pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, `pre-push`,
       `post-checkout`, `post-merge`), with Git for Windows' `sh` discovery and a trust check
 - [x] `branch -m` keeps the reflog and upstream configuration
-- [ ] Delta-compressed packs for push (gix-pack's output pipeline)
-- [x] `add -p` (per-hunk y/n/q/a/d)
-- [ ] Hunk split/edit in `add -p`; `exec`/`break` in `rebase -i`
+- [x] Delta-compressed (thin) packs for push: a block-matching delta encoder, `REF_DELTA` against the previous version of each path
+- [x] `add -p` (per-hunk y/n/q/a/d/s) and `exec`/`break` in `rebase -i`
 - [x] `branch cleanup [--dry-run]`, `branch compare`, `sync [--push]`
-- [ ] `branch graph`, `branch explain`
+- [x] `branch graph`, `branch explain` (with an in-memory merge preview)
 - [ ] CI on Linux, macOS and Windows (the workflow exists but is blocked on account billing), and a
       published compatibility matrix
 

@@ -236,7 +236,12 @@ pub fn push(ctx: &Ctx, args: PushArgs) -> Result<()> {
         } else if outcome.objects_sent > 0 {
             anstream::println!(
                 "{}",
-                ui::dim(&format!("{} objects, {} sent", outcome.objects_sent, human_bytes(outcome.pack_bytes)))
+                ui::dim(&format!(
+                    "{} objects ({} as deltas), {} sent",
+                    outcome.objects_sent,
+                    outcome.deltas,
+                    human_bytes(outcome.pack_bytes)
+                ))
             );
         }
     }

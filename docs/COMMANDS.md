@@ -30,7 +30,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git add <paths>` / `.` | `veyra add <paths>` (alias `stage`) | ✅ | Globs (`*.rs`) work even in PowerShell. Stages deletions, like Git 2.x. |
 | `git add -A` / `-u` | `veyra add -A` / `-u` | ✅ | |
 | `git add -f` | `veyra add --force` | ✅ | Needed for ignored files |
-| `git add -p` | `veyra add -p [paths]` | ✅ | `y`/`n`/`q`/`a`/`d` per hunk, deletions and binary files as a whole. No hunk splitting or editing yet. |
+| `git add -p` | `veyra add -p [paths]` | ✅ | `y`/`n`/`q`/`a`/`d`/`s` (split) per hunk, deletions and binary files as a whole. No hunk editing (`e`) yet. |
 | `git rm [--cached] [-r] [-f]` | `veyra rm` (alias `remove`) | ✅ | Refuses files with changes unless `-f` |
 | `git mv` | `veyra mv` (alias `move`) | ✅ | |
 | `git restore <paths>` | `veyra restore <paths>` / `veyra discard <paths>` | ✅ | **Difference:** the old contents are checkpointed first, so `veyra undo` recovers them |
@@ -68,7 +68,8 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | — | `veyra branch stale [--days N]` | ✅ | Age + merged status |
 | — | `veyra branch cleanup [--dry-run]` | ✅ | Deletes local branches fully merged into the default branch. `veyra undo` restores them. |
 | — | `veyra branch compare <branch> [base]` | ✅ | Ahead/behind, merge base, changed files and a suggestion. `--json`. |
-| — | `veyra branch graph / explain` | 🗓 2 | `veyra log --graph --all` covers the graph today |
+| — | `veyra branch graph` | ✅ | The branch tree by commit ancestry (not names), with ahead/behind counts |
+| — | `veyra branch explain [name]` | ✅ | Base, ahead/behind, areas touched, predicted conflicts (in-memory merge, writes nothing), suggested action |
 | `git switch <b>` / `-c` / `--detach` / `-` | `veyra switch …` | ✅ | Refuses to overwrite local changes. `--force` checkpoints first. Creates tracking branches from `origin/<b>`. |
 | `git checkout <b>` / `-b` / `-- <paths>` | `veyra checkout …` | ✅ | Prefer `switch` and `restore` |
 
@@ -83,7 +84,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git cherry-pick [-x] [-n] [-m N]` | `veyra cherry-pick` | ✅ | Keeps the original author. Conflicts leave `CHERRY_PICK_HEAD` like Git. `--continue` / `--abort`. |
 | `git revert [-n] [-m N]` | `veyra revert` | ✅ | The safe way to reverse pushed commits. `--continue` / `--abort`. |
 | `git rebase <upstream> [--onto X]` | `veyra rebase` | ✅ | Defaults to the branch's upstream. `--continue` / `--skip` / `--abort`. State lives in `.git/veyra/rebase-state`, so plain `git rebase --continue` doesn't know about it. `veyra undo` restores the pre-rebase branch. |
-| `git rebase -i` | `veyra rebase -i <upstream>` | ✅ | `pick`, `reword`, `edit`, `squash`, `fixup`, `drop` (and their one-letter forms), plus reordering. Uses `GIT_SEQUENCE_EDITOR` / `sequence.editor`, then the commit editor. No `exec` or `break` yet. |
+| `git rebase -i` | `veyra rebase -i <upstream>` | ✅ | `pick`, `reword`, `edit`, `squash`, `fixup`, `drop`, `exec`, `break` (and their one-letter forms), plus reordering. Uses `GIT_SEQUENCE_EDITOR` / `sequence.editor`, then the commit editor. |
 | `git rerere` | `veyra merge resolutions` | 🗓 4 | |
 | — | `veyra merge --semantic / --assist / --explain / --simulate` | 🗓 4–5 | Conservative by default |
 
@@ -113,7 +114,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git remote [-v]`, `add`, `remove` | `veyra remote …` | ✅ | |
 | `git fetch [remote]` | `veyra fetch` | ✅ | |
 | `git pull [--ff-only]` | `veyra pull` | ✅ | Fetch + fast-forward or merge |
-| `git push [remote] [refspec…]` | `veyra push` | ✅ | Implemented on gix's transport (HTTPS, SSH, local). Supports `-u`, `--tags`, `--delete`, `+refspec`, `--force`, `--force-with-lease`, `--dry-run`, `--no-verify`. Credential helpers are used. Packs are sent without delta compression for now (larger than Git's). |
+| `git push [remote] [refspec…]` | `veyra push` | ✅ | Implemented on gix's transport (HTTPS, SSH, local). Supports `-u`, `--tags`, `--delete`, `+refspec`, `--force`, `--force-with-lease`, `--dry-run`, `--no-verify`. Credential helpers are used. Changed blobs are sent as deltas against their previous version (a thin pack, like `git push --thin`). |
 | `git ls-remote` | `veyra remote refs` | 🗓 2 | |
 | — | `veyra sync [--push]` | ✅ | Fetch, then fast-forward, or rebase onto the upstream if both sides moved. Refuses with uncommitted changes. Pushes only with `--push`. |
 

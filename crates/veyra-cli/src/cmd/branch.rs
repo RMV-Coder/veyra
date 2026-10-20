@@ -21,6 +21,8 @@ pub fn branch(ctx: &Ctx, args: BranchArgs) -> Result<()> {
             BranchCommand::Rename { old, new } => rename(ctx, &repo, &old, &new),
             BranchCommand::Stale { days } => stale(ctx, &repo, days),
             BranchCommand::Cleanup { dry_run } => cleanup(ctx, &repo, dry_run),
+            BranchCommand::Graph => graph(ctx, &repo),
+            BranchCommand::Explain { name } => explain(ctx, &repo, name.as_deref()),
             BranchCommand::Compare { branch, base } => compare(ctx, &repo, &branch, base.as_deref()),
         };
     }
@@ -581,5 +583,115 @@ fn compare(ctx: &Ctx, repo: &Repo, branch: &str, base: Option<&str>) -> Result<(
         _ => format!("diverged: `veyra rebase {base_label}` on {branch}, or merge"),
     };
     anstream::println!("  Suggested:       {advice}");
+    Ok(())
+}
+
+fn graph(ctx: &Ctx, repo: &Repo) -> Result<()> {
+    let nodes = repo.branch_tree()?;
+    if ctx.json {
+        ui::json(&json!(nodes.iter().map(|n| json!({
+            "branch": n.name, "parent": n.parent, "ahead": n.ahead, "behind": n.behind, "tip": n.tip.to_string(),
+        })).collect::<Vec<_>>()));
+        return Ok(());
+    }
+    let current = repo.head_state()?.branch_short().map(str::to_owned);
+    fn render(nodes: &[veyra_core::merge::BranchNode], parent: &str, prefix: &str, current: Option<&str>) {
+        let children: Vec<_> = nodes.iter().filter(|n| n.parent.as_deref() == Some(parent)).collect();
+        for (i, child) in children.iter().enumerate() {
+            let last = i + 1 == children.len();
+            let mut stats = Vec::new();
+            if child.ahead > 0 {
+                stats.push(ui::green(&format!("+{}", child.ahead)));
+            }
+            if child.behind > 0 {
+                stats.push(ui::red(&format!("-{}", child.behind)));
+            }
+            let name = if current == Some(child.name.as_str()) {
+                ui::green(&format!("* {}", child.name))
+            } else {
+                child.name.clone()
+            };
+            let stats = if stats.is_empty() { String::new() } else { format!("  ({})", stats.join(" ")) };
+            anstream::println!("{prefix}{}{name}{stats}", if last { "└── " } else { "├── " });
+            let deeper = format!("{prefix}{}", if last { "    " } else { "│   " });
+            render(nodes, &child.name, &deeper, current);
+        }
+    }
+    for root in nodes.iter().filter(|n| n.parent.is_none()) {
+        let name = if current.as_deref() == Some(root.name.as_str()) {
+            ui::green(&format!("* {}", root.name))
+        } else {
+            root.name.clone()
+        };
+        anstream::println!("{name}");
+        render(&nodes, &root.name, "", current.as_deref());
+    }
+    anstream::println!("\n{}", ui::dim("(+N commits ahead of / -N behind the branch it was forked from)"));
+    Ok(())
+}
+
+fn explain(ctx: &Ctx, repo: &Repo, name: Option<&str>) -> Result<()> {
+    let name = match name {
+        Some(n) => n.to_owned(),
+        None => repo.head_state()?.branch_short().map(str::to_owned).context("HEAD is detached; name a branch")?,
+    };
+    let tree = repo.branch_tree()?;
+    let node = tree.iter().find(|n| n.name == name).with_context(|| format!("branch '{name}' not found"))?;
+    let base = node.parent.clone().unwrap_or_else(|| name.clone());
+    let base_tip = repo.ref_target(&format!("refs/heads/{base}"))?.context("base branch vanished")?;
+    let merge_base = repo.git().merge_base(node.tip, base_tip).ok().flatten().map(|m| m.detach());
+    let changed = match merge_base {
+        Some(mb) => veyra_core::flat::diff(&repo.flat_from_commit(mb)?, &repo.flat_from_commit(node.tip)?),
+        None => Vec::new(),
+    };
+    let mut areas: std::collections::BTreeMap<String, usize> = Default::default();
+    for c in &changed {
+        let path = c.path.to_string();
+        let area = path.split('/').next().filter(|_| path.contains('/')).unwrap_or("(root)").to_owned();
+        *areas.entry(area).or_default() += 1;
+    }
+    let conflicts =
+        if node.behind > 0 && node.ahead > 0 { repo.merge_preview(base_tip, node.tip)? } else { Vec::new() };
+    let suggestion = match (node.ahead, node.behind, conflicts.is_empty()) {
+        (_, _, _) if node.parent.is_none() => "this is the root branch".to_owned(),
+        (0, 0, _) => format!("identical to {base}; safe to delete"),
+        (0, _, _) => format!("fully merged into {base} ({} behind); `veyra branch -d {name}`", node.behind),
+        (_, 0, _) => format!("fast-forwardable: `veyra switch {base} && veyra merge {name}`"),
+        (_, _, true) => format!("rebase onto {base} (`veyra rebase {base}`): it merges cleanly"),
+        (_, _, false) => format!("rebase onto {base} and resolve {} conflict(s) first", conflicts.len()),
+    };
+    if ctx.json {
+        ui::json(&json!({
+            "branch": name, "base": base, "ahead": node.ahead, "behind": node.behind,
+            "changed_files": changed.len(), "areas": areas,
+            "conflicts": conflicts.iter().map(|c| c.to_string()).collect::<Vec<_>>(), "suggestion": suggestion,
+        }));
+        return Ok(());
+    }
+    anstream::println!("{} {name}\n", ui::bold("Branch:"));
+    anstream::println!("Base:\n  {base}{}\n", if node.parent.is_none() { " (root)" } else { "" });
+    anstream::println!("Commits ahead:\n  {}\n", node.ahead);
+    anstream::println!("Commits behind:\n  {}\n", node.behind);
+    anstream::println!("Changed files:\n  {}\n", changed.len());
+    if !areas.is_empty() {
+        anstream::println!("Areas touched:");
+        for (area, n) in &areas {
+            anstream::println!("  {area} ({n})");
+        }
+        anstream::println!();
+    }
+    anstream::println!("Potential conflicts with {base}:");
+    if conflicts.is_empty() {
+        anstream::println!(
+            "  none{}\n",
+            if node.behind == 0 || node.ahead == 0 { " (no divergence)" } else { " (checked with an in-memory merge)" }
+        );
+    } else {
+        for c in &conflicts {
+            anstream::println!("  {}", ui::red(&c.to_string()));
+        }
+        anstream::println!();
+    }
+    anstream::println!("Suggested action:\n  {suggestion}");
     Ok(())
 }
