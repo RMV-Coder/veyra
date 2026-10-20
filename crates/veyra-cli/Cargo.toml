@@ -1,0 +1,32 @@
+[package]
+name = "veyra-cli"
+description = "Veyra — version control that understands your code (Git-compatible, written in Rust)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "veyra"
+path = "src/main.rs"
+
+[dependencies]
+veyra-core.workspace = true
+veyra-ops.workspace = true
+veyra-security.workspace = true
+veyra-intent.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+anstream.workspace = true
+anstyle.workspace = true
+similar.workspace = true
+jiff.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+assert_cmd.workspace = true
+predicates.workspace = true

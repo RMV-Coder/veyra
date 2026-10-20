@@ -1,0 +1,17 @@
+[package]
+name = "veyra-ops"
+description = "Veyra's operation log: undo, redo, restore and automatic checkpoints"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+veyra-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

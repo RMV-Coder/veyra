@@ -1,0 +1,22 @@
+[package]
+name = "veyra-core"
+description = "Repository facade for Veyra, built on gitoxide"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = ["https"]
+# HTTPS transport for clone/fetch (rustls, no OpenSSL needed).
+https = ["gix/blocking-http-transport-reqwest-rust-tls"]
+
+[dependencies]
+gix = { workspace = true, features = ["blocking-network-client"] }
+anyhow.workspace = true
+similar.workspace = true
+jiff.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

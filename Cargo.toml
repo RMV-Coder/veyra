@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+authors = ["Veyra contributors"]
+
+[workspace.dependencies]
+veyra-core = { path = "crates/veyra-core", version = "0.1.0" }
+veyra-ops = { path = "crates/veyra-ops", version = "0.1.0" }
+veyra-security = { path = "crates/veyra-security", version = "0.1.0" }
+veyra-intent = { path = "crates/veyra-intent", version = "0.1.0" }
+
+gix = { version = "0.89", default-features = true }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+regex = "1"
+globset = "0.4"
+similar = "2"
+jiff = "0.2"
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+anstream = "0.6"
+anstyle = "1"
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+
+# Keep build output small (a full debug build of gitoxide is several GB otherwise).
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
