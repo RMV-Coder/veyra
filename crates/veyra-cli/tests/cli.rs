@@ -776,6 +776,16 @@ fn install_hook(env: &Env, name: &str, body: &str) {
     }
 }
 
+/// An editor command (for `GIT_EDITOR` / `GIT_SEQUENCE_EDITOR`) that rewrites the file with an
+/// awk `program`. GNU and BSD `sed -i` disagree, so the tests don't use sed for this.
+fn awk_editor(env: &Env, name: &str, program: &str) -> String {
+    assert!(!program.contains('\''), "the program is single-quoted");
+    let script = env.home.join(format!("{name}.sh"));
+    std::fs::write(&script, format!("#!/bin/sh\nawk '{program}' \"$1\" > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"\n"))
+        .unwrap();
+    format!("sh {}", script.to_string_lossy().replace('\\', "/"))
+}
+
 #[test]
 fn commit_hooks_run_like_git() {
     require_git!();
@@ -913,11 +923,16 @@ fn interactive_rebase_drops_rewords_and_squashes() {
     env.commit_file("four.txt", "4\n", "c4");
 
     // drop c2, fold c3 into c1 (fixup), reword c4.
-    let seq = r#"sed -i -e 's/^pick \([0-9a-f]*\) c2$/drop \1 c2/' -e 's/^pick \([0-9a-f]*\) c3$/fixup \1 c3/' -e 's/^pick \([0-9a-f]*\) c4$/reword \1 c4/'"#;
+    let seq = awk_editor(
+        &env,
+        "todo",
+        r#"/^pick [0-9a-f]+ c2$/ { sub(/^pick/, "drop") } /^pick [0-9a-f]+ c3$/ { sub(/^pick/, "fixup") } /^pick [0-9a-f]+ c4$/ { sub(/^pick/, "reword") } { print }"#,
+    );
+    let message = awk_editor(&env, "message", r#"NR == 1 { $0 = "c4 reworded" } { print }"#);
     let out = env
         .veyra(&["rebase", "-i", "main"])
         .env("GIT_SEQUENCE_EDITOR", seq)
-        .env("GIT_EDITOR", "sed -i -e '1s/.*/c4 reworded/'")
+        .env("GIT_EDITOR", message)
         .output()
         .unwrap();
     assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -938,7 +953,11 @@ fn interactive_rebase_can_reorder_and_stop_to_edit() {
     env.commit_file("x.txt", "x\n", "cx");
     env.commit_file("y.txt", "y\n", "cy");
     // Swap the two commits and stop at cx to amend it.
-    let seq = "sed -i -n -e '/ cx$/{s/^pick/edit/;h;d}' -e '/ cy$/{p;x;p;d}' -e p";
+    let seq = awk_editor(
+        &env,
+        "todo",
+        r#"/ cx$/ { sub(/^pick/, "edit"); held = $0; next } / cy$/ { print; print held; next } { print }"#,
+    );
     env.veyra(&["rebase", "-i", "HEAD~2"])
         .env("GIT_SEQUENCE_EDITOR", seq)
         .assert()
@@ -1029,7 +1048,11 @@ fn interactive_rebase_exec_and_break() {
     env.commit_file("one.txt", "1\n", "c1");
     env.commit_file("two.txt", "2\n", "c2");
 
-    let seq = r#"sed -i -e '/ c1$/a exec echo ok > .git/exec-ran' -e '/ c2$/a break'"#;
+    let seq = awk_editor(
+        &env,
+        "todo",
+        r#"{ print } / c1$/ { print "exec echo ok > .git/exec-ran" } / c2$/ { print "break" }"#,
+    );
     env.veyra(&["rebase", "-i", "HEAD~2"])
         .env("GIT_SEQUENCE_EDITOR", seq)
         .assert()
@@ -1040,7 +1063,7 @@ fn interactive_rebase_exec_and_break() {
     env.ok(&["rebase", "--continue"]);
     assert_eq!(env.git(&["log", "--format=%s"]), "c2\nc1\nbase\n");
 
-    let failing = r#"sed -i -e '/ c1$/a exec exit 3'"#;
+    let failing = awk_editor(&env, "failing", r#"{ print } / c1$/ { print "exec exit 3" }"#);
     env.veyra(&["rebase", "-i", "HEAD~2"])
         .env("GIT_SEQUENCE_EDITOR", failing)
         .assert()
@@ -2207,7 +2230,7 @@ fn a_rebase_started_by_git_is_continued_or_aborted_by_veyra() {
     let mut cmd = Command::new("git");
     env.apply(&mut cmd);
     let out = cmd
-        .env("GIT_SEQUENCE_EDITOR", "sed -i -e '1s/^pick/edit/'")
+        .env("GIT_SEQUENCE_EDITOR", awk_editor(&env, "first-edit", r#"NR == 1 { sub(/^pick/, "edit") } { print }"#))
         .current_dir(&env.repo)
         .args(["rebase", "-i", "HEAD~2"])
         .output()
