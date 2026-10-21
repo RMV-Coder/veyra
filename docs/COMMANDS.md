@@ -16,12 +16,13 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 
 | Git | Veyra | Status | Notes |
 |---|---|---|---|
-| `git init [dir]` | `veyra init [dir] [-b <branch>]` | ✅ | Respects `init.defaultBranch` |
+| `git init [dir]` | `veyra init [dir] [-b <branch>] [--object-format sha256]` | ✅ | Respects `init.defaultBranch`. SHA-256 repositories work end to end. |
 | `git clone <url> [dir]` | `veyra clone <url> [dir]` | ✅ | HTTPS (rustls), SSH, `file://` and local paths through gitoxide |
 | `git status` | `veyra status [--short] [--json]` | ✅ | `--short` output matches `git status --porcelain`. Paths are shown relative to the repository root. |
 | `git config` | `veyra config [--global] <key> [<value>]`, `--unset`, `--list` | ✅ | Same files as Git |
 | `git help` / `--version` | `veyra help`, `veyra --version` | ✅ | |
-| `git clone --scope …` | `veyra clone --scope <name>` | 🗓 3 | Declared scopes → partial clone + sparse cone |
+| `git clone --sparse` | `veyra clone <url> --scope <name>` / `--sparse <dir>…` | ✅ | Only the scope's directories are checked out (cone-mode sparse). Scopes are declared in `.veyra/scopes.toml`. gitoxide has no partial-clone filters yet, so all objects are still fetched. |
+| `git sparse-checkout set/add/list/disable` | `veyra sparse set [dirs] [--scope s]` / `add` / `list` / `disable` | ✅ | Same `.git/info/sparse-checkout` and skip-worktree bits as Git (`git sparse-checkout list` agrees). Refuses to hide files with local changes. |
 
 ## Staging and committing
 
@@ -40,7 +41,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | — | `veyra commit --assisted-by "<tool>"` | ✅ | Adds `Assisted-by:`. Provenance is declared, never guessed. |
 | — | `veyra commit --intent <id>` | ✅ | Adds `Intent:` |
 | — | secret scan + intent check on commit | ✅ | `--allow-secrets`, `--no-verify` |
-| `git commit -S` | signed commits | 🗓 3 | Veyra warns when `commit.gpgsign` is on and it can't sign |
+| `git commit -S` / `commit.gpgSign` | `veyra commit -S` / `--no-gpg-sign` | ✅ | OpenPGP, X.509 or SSH per `gpg.format` / `user.signingKey` (via gitoxide). Merges, cherry-picks and rebases are signed too when `commit.gpgSign` is set. |
 | Git hooks | `pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, `pre-push`, `post-checkout`, `post-merge` | ✅ | `core.hooksPath` respected. Hooks run through Git for Windows' `sh` on Windows. Never run in repositories you don't own. `--no-verify` skips them. |
 | — | `veyra commit --smart` / `--split` | 🗓 5 | Optional AI. Always proposed, never automatic. |
 
@@ -107,6 +108,13 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `veyra stash [push] [-m] [-u] [--keep-index]` / `list` / `show [-p]` / `apply [--index]` / `pop` / `drop` / `clear` (aliases `shelve`, `unshelve`) | ✅ | Same `refs/stash` structure and reflog as Git: `git stash` and `veyra stash` see each other's entries. A conflicted pop keeps the entry. |
 | `veyra clean -f [-d] [-n] [paths]` | ✅ | Like `git clean`, but the files are checkpointed first, so `veyra undo` brings them back. Ignored files are never removed (no `-x` yet). |
 
+## Worktrees and submodules
+
+| Git | Veyra | Status | Notes |
+|---|---|---|---|
+| `git worktree add/list/remove/prune` | `veyra worktree add <path> [branch] [-b new] [--detach]` / `list` / `remove [--force]` / `prune` | ✅ | Via gitoxide. Each linked worktree has its **own** operation log and keep ref, so `veyra undo` there only touches that worktree. |
+| `git submodule status/init/update/add/foreach` | `veyra submodule [status]` / `init` / `update [--init] [--recursive]` / `add <url> [path]` / `foreach <cmd>` | ✅ | Submodules are cloned into their path (Git's embedded layout). Relative URLs resolve against `origin`. |
+
 ## Remotes
 
 | Git | Veyra | Status | Notes |
@@ -122,8 +130,8 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 
 | Git | Veyra | Status | Notes |
 |---|---|---|---|
-| `git tag` / `<name> [rev]` / `-a -m` / `-d` / `-f` | `veyra tag …` / `tag create\|delete\|list` | ✅ | Annotated tags have a tagger |
-| `git verify-tag` | `veyra verify tag` | 🗓 3 | |
+| `git tag` / `<name> [rev]` / `-a -m` / `-s` / `-d` / `-f` | `veyra tag …` / `tag create\|delete\|list` | ✅ | `-s` (or `tag.gpgSign`) signs. Annotated tags have a tagger. |
+| `git verify-commit` / `git verify-tag` | `veyra verify commit [rev]` / `veyra verify tag <name>` | ✅ | Uses Git's verification config (`gpg.ssh.allowedSignersFile`, `gpg.program`, …) |
 | — | `veyra release notes / prepare / verify` | 🗓 3 | |
 
 ## Diagnostics, security and intent (Veyra-only)
@@ -137,9 +145,13 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `veyra intent list / show / verify [--staged\|--rev] / close / log` | ✅ | `verify` exits non-zero on violations |
 | `veyra explain <git command…>` | ✅ | What it does, risk, recovery, Veyra equivalent |
 | `git fsck` | `veyra doctor` | 🟡 | doctor checks refs, commits and trees. Use `git fsck --full` for blobs. |
-| `git gc` / `maintenance` / `count-objects` | `veyra maintenance …` / `storage stats` | 🗓 3 | doctor reports storage now. `git gc` is safe to run. |
+| `git count-objects -v` | `veyra storage stats [--json]` | ✅ | |
+| `git gc` / `git maintenance run` | `veyra maintenance run [--prune-expire 2w]` | ✅ | Packs loose objects (Veyra's own pack writer, indexed by gitoxide), then prunes unreachable loose objects past the grace period. Reachability includes every ref, reflog entry, the index, in-progress state and Veyra's journal. Packs are never rewritten. |
+| `git prune` | `veyra maintenance prune [--expire 2w] [-n]` | ✅ | |
 | — | `veyra impact [--staged] [--tests]` | 🗓 4 | |
-| — | `veyra verify --history / --provenance` | 🗓 3 | |
+| — | `veyra verify --history [--rev R] [-n N]` | ✅ | Signature status of every commit (good / bad / unsigned) |
+| — | `veyra attest run [--sign] -- <cmd>` / `attest review [--reject] [--sign]` / `attest list` | ✅ | in-toto v1 Statements in Git notes (`refs/notes/veyra/attestations`), shareable with `veyra push origin refs/notes/veyra/attestations` |
+| — | `veyra verify --provenance [--rev R]` | ✅ | Lists a commit's attestations and checks their signatures |
 | — | `veyra ai …` | 🗓 5 | Optional; never required |
 
 ## Plumbing

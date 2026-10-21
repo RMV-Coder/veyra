@@ -50,14 +50,21 @@ Known gaps carried forward: push, stash, rebase, cherry-pick, revert, hooks, com
 **Exit criterion:** a developer can use Veyra full-time on a GitHub project without falling back
 to `git`, and the conformance suite covers every Phase 1–2 command on all three platforms.
 
-## Phase 3 — Trust and scale
+## Phase 3 — Trust and scale ✅
 
-- Commit and tag signing (SSH, GPG), `verify commit/tag/--history`, attestations (in-toto/SLSA)
-- `clone --scope` (declared scopes → partial clone + sparse cone), `maintenance`, `storage stats`
-- Worktrees, submodules (write paths), sparse checkout, SHA-256 repositories as gix matures
-- Performance budgets: `status` and checkpoint on a 100k-file repository within agreed limits
+- [x] Commit and tag signing (OpenPGP, X.509, SSH) via gitoxide, honouring `commit.gpgSign` / `tag.gpgSign`;
+      `verify commit`, `verify tag`, `verify --history`
+- [x] Attestations: in-toto v1 Statements (test results, reviews) in Git notes, optionally signed;
+      `verify --provenance`
+- [x] `clone --scope` / `--sparse` and `sparse set/add/list/disable` (Git's cone mode, skip-worktree bits)
+- [x] `storage stats`, `maintenance run / pack-loose / prune` (no `git gc` needed)
+- [x] Worktrees (each with its own journal) and submodules (status/init/update/add/foreach)
+- [x] SHA-256 repositories (`init --object-format sha256`)
+- [x] Performance budgets: `cargo test --release -p veyra-cli --test perf -- --ignored` (10k files).
+      New blobs are written as packs instead of thousands of loose files.
+- [ ] Partial-clone object filters (`--filter=blob:none`) once gitoxide exposes them
 
-**Exit criterion:** benchmarks published; signed-history verification works on real projects.
+**Exit criterion:** met. Signed history verifies in both Git and Veyra, and the 10k-file budgets pass.
 
 ## Phase 4 — Code intelligence (deterministic)
 

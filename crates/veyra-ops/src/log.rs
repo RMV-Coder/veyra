@@ -13,7 +13,8 @@ use veyra_core::{ObjectId, Repo};
 
 use crate::view::{self, Captured, View, parse_id};
 
-/// The ref that keeps journal objects alive through `git gc`.
+/// The ref that keeps the main worktree's journal objects alive through `git gc`
+/// (linked worktrees use `refs/veyra/keep-<id>`; see `Repo::keep_ref`).
 pub const KEEP_REF: &str = "refs/veyra/keep";
 
 /// One journaled operation.
@@ -267,7 +268,7 @@ impl<'r> OpLog<'r> {
     /// and whose parents are the commits operations orphaned.
     fn protect(&self, op: &Operation) -> Result<()> {
         let repo = self.repo;
-        let previous = repo.ref_target(KEEP_REF)?;
+        let previous = repo.ref_target(&repo.keep_ref())?;
         let (base_tree, mut parents) = match previous {
             Some(keep) => {
                 let info = repo.commit_info(keep)?;
@@ -327,7 +328,7 @@ impl<'r> OpLog<'r> {
 
         // Rebuild the keep commit from scratch.
         let repo = self.repo;
-        let previous = repo.ref_target(KEEP_REF)?;
+        let previous = repo.ref_target(&repo.keep_ref())?;
         let mut flat = veyra_core::FlatTree::new();
         let mut parents = Vec::new();
         let mut known = BTreeSet::new();
@@ -386,7 +387,7 @@ fn write_keep_commit(repo: &Repo, tree: ObjectId, parents: &[ObjectId], previous
         extra_headers: Default::default(),
     };
     let id = repo.git().write_object(&commit)?.detach();
-    repo.set_ref(KEEP_REF, id, Some(previous), "veyra: keep")?;
+    repo.set_ref(&repo.keep_ref(), id, Some(previous), "veyra: keep")?;
     Ok(())
 }
 

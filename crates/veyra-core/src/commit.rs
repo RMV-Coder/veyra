@@ -18,6 +18,8 @@ pub struct CommitRequest {
     pub trailers: Vec<(String, String)>,
     /// Use this author instead of the configured identity (cherry-pick and rebase keep the original author).
     pub author: Option<gix::actor::Signature>,
+    /// Whether to sign the commit (`-S`, `--no-gpg-sign`, or `commit.gpgSign`).
+    pub sign: crate::sign::SignMode,
 }
 
 /// A decoded commit, for display.
@@ -170,7 +172,7 @@ impl Repo {
             parents: parents.iter().copied().collect(),
             extra_headers: Default::default(),
         };
-        let id = self.git.write_object(&commit)?.detach();
+        let id = self.write_commit_object(commit, self.should_sign(request.sign))?;
 
         let summary = message.lines().next().unwrap_or_default();
         let reflog = match (request.amend, head_commit) {
@@ -224,16 +226,6 @@ impl Repo {
             out.push(self.commit_info(info.id)?);
         }
         Ok(out)
-    }
-
-    /// Warn-worthy facts about the commit environment Veyra doesn't fully support yet.
-    pub fn commit_caveats(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        let config = self.git.config_snapshot();
-        if config.boolean("commit.gpgsign").unwrap_or(false) {
-            out.push("commit.gpgsign is enabled, but Veyra cannot sign commits yet; this commit is unsigned".into());
-        }
-        out
     }
 
     /// The current branch name for messages, e.g. `main` or `HEAD (detached)`.

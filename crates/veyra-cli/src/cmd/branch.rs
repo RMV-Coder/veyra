@@ -354,6 +354,8 @@ pub fn merge(
                 intent: vec![],
                 allow_secrets: false,
                 no_verify: false,
+                gpg_sign: false,
+                no_gpg_sign: false,
             },
         );
     }
@@ -478,6 +480,9 @@ pub fn tag(ctx: &Ctx, args: TagArgs) -> Result<()> {
     }
     let target_id = repo.rev_parse_commit(target.as_deref().unwrap_or("HEAD"))?;
     let exists = repo.ref_target(&full)?;
+    let sign = args.sign || repo.config_bool("tag.gpgSign").unwrap_or(false);
+    // A signed tag is always annotated.
+    let message = if sign && message.is_none() { Some(String::new()) } else { message };
     if exists.is_some() && !args.force {
         bail!("tag '{name}' already exists (use --force to move it)");
     }
@@ -487,20 +492,7 @@ pub fn tag(ctx: &Ctx, args: TagArgs) -> Result<()> {
                 repo.require_identity()?;
                 let msg =
                     if msg.is_empty() { format!("{name}\n") } else { veyra_core::commit::clean_message(msg, false) };
-                let tagger = repo.git().committer().context("no identity")??;
-                let constraint = if exists.is_some() {
-                    veyra_core::gix::refs::transaction::PreviousValue::Any
-                } else {
-                    veyra_core::gix::refs::transaction::PreviousValue::MustNotExist
-                };
-                repo.git().tag(
-                    &name,
-                    target_id,
-                    veyra_core::gix::objs::Kind::Commit,
-                    Some(tagger),
-                    &msg,
-                    constraint,
-                )?;
+                repo.create_tag(&name, target_id, &msg, sign, exists.is_some())?;
             }
             None => repo.set_ref(&full, target_id, if exists.is_some() { None } else { Some(None) }, "tag")?,
         }

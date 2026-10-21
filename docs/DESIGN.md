@@ -118,6 +118,9 @@ them trivial to unit-test and to reuse in CI tools and editor plugins.
 | `refs/veyra/keep` | A commit that keeps snapshot trees, index trees and orphaned commits reachable so `git gc` won't prune them | Not pushed by default |
 | `.veyra/intents/*.toml` | Intent records, committed and reviewed | Yes |
 | `.veyra/secrets.toml` | Secret-scan allowlist and custom rules, committed | Yes |
+| `.veyra/scopes.toml` | Named directory sets for `clone --scope` / `sparse set --scope`, committed | Yes |
+| `refs/notes/veyra/attestations` | in-toto attestations about commits (Git notes) | Push explicitly |
+| `.git/worktrees/<id>/veyra/`, `refs/veyra/keep-<id>` | A linked worktree's own journal and keep ref | No |
 
 Using Git config for local settings means one configuration system instead of two (there is no
 `config.toml`).

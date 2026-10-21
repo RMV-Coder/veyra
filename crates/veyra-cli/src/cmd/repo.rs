@@ -11,14 +11,25 @@ use super::{journal, maybe_auto_checkpoint, pathspec, plural};
 use crate::cli::{CommitArgs, RestoreArgs};
 use crate::{Ctx, ui};
 
-pub fn init(ctx: &Ctx, directory: Option<std::path::PathBuf>, initial_branch: Option<String>) -> Result<()> {
+pub fn init(
+    ctx: &Ctx,
+    directory: Option<std::path::PathBuf>,
+    initial_branch: Option<String>,
+    object_format: Option<String>,
+) -> Result<()> {
+    let hash = match object_format.as_deref() {
+        None | Some("sha1") => None,
+        Some("sha256") => Some(veyra_core::gix::hash::Kind::Sha256),
+        Some(other) => bail!("unknown object format '{other}' (use sha1 or sha256)"),
+    };
     let path = match directory {
         Some(d) if d.is_absolute() => d,
         Some(d) => ctx.cwd.join(d),
         None => ctx.cwd.clone(),
     };
     let existed = path.join(".git").exists();
-    let repo = if existed { Repo::open(&path)? } else { Repo::init(&path, initial_branch.as_deref())? };
+    let repo =
+        if existed { Repo::open(&path)? } else { Repo::init_with_format(&path, initial_branch.as_deref(), hash)? };
     let git_dir = std::fs::canonicalize(repo.git_dir()).unwrap_or_else(|_| repo.git_dir().to_owned());
     // Drop Windows' verbatim prefix (`\\?\`) for display.
     let git_dir = std::path::PathBuf::from(git_dir.to_string_lossy().trim_start_matches(r"\\?\"));
@@ -30,14 +41,32 @@ pub fn init(ctx: &Ctx, directory: Option<std::path::PathBuf>, initial_branch: Op
     Ok(())
 }
 
-pub fn clone(ctx: &Ctx, url: &str, directory: Option<std::path::PathBuf>) -> Result<()> {
+pub fn clone(
+    ctx: &Ctx,
+    url: &str,
+    directory: Option<std::path::PathBuf>,
+    scope: Option<String>,
+    sparse: Vec<String>,
+) -> Result<()> {
     let name = directory.unwrap_or_else(|| {
         let trimmed = url.trim_end_matches('/').trim_end_matches(".git");
         std::path::PathBuf::from(trimmed.rsplit(['/', '\\', ':']).next().unwrap_or("repository"))
     });
     let path = if name.is_absolute() { name } else { ctx.cwd.join(name) };
     anstream::eprintln!("Cloning into '{}'...", path.display());
-    let repo = Repo::clone_from(url, &path)?;
+    let request = match (scope, sparse.is_empty()) {
+        (Some(s), _) => Some(veyra_core::sparse::ScopeRequest::Named(s)),
+        (None, false) => Some(veyra_core::sparse::ScopeRequest::Dirs(sparse)),
+        (None, true) => None,
+    };
+    let repo = match request {
+        Some(req) => {
+            let (repo, dirs) = Repo::clone_scoped(url, &path, req)?;
+            anstream::println!("Sparse checkout of: {}", dirs.join(", "));
+            repo
+        }
+        None => Repo::clone_from(url, &path)?,
+    };
     let label = repo.head_label().unwrap_or_default();
     anstream::println!("Cloned {url} ({label})");
     Ok(())
@@ -345,10 +374,6 @@ pub fn commit(ctx: &Ctx, args: CommitArgs) -> Result<()> {
         trailers.push(("Intent".into(), found.1.id.clone()));
     }
 
-    for caveat in repo.commit_caveats() {
-        ui::warn(&caveat);
-    }
-
     let log = veyra_ops::OpLog::open(&repo)?;
     let tx = log.begin(if args.amend { "amend" } else { "commit" }, &ctx.argv, false)?;
     let original_index = tx.before.view.index_tree_id()?;
@@ -406,7 +431,15 @@ pub fn commit(ctx: &Ctx, args: CommitArgs) -> Result<()> {
             return Err(err);
         }
     };
-    let request = CommitRequest { message, amend: args.amend, allow_empty: args.allow_empty, trailers, author: None };
+    let sign = if args.gpg_sign {
+        veyra_core::sign::SignMode::Always
+    } else if args.no_gpg_sign {
+        veyra_core::sign::SignMode::Never
+    } else {
+        veyra_core::sign::SignMode::Config
+    };
+    let request =
+        CommitRequest { message, amend: args.amend, allow_empty: args.allow_empty, trailers, author: None, sign };
     let parent_tree = repo.head_tree_id()?;
     let id = if picking {
         // Finishing a stopped cherry-pick/revert keeps the original author, like git.

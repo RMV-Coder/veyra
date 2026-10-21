@@ -10,6 +10,7 @@
 //! same comparison and application logic.
 
 pub mod annotate;
+pub mod attest;
 pub mod checkout;
 pub mod commit;
 pub mod config;
@@ -18,16 +19,22 @@ pub mod diff;
 pub mod flat;
 pub mod hooks;
 pub mod index;
+pub mod maintenance;
 pub mod merge;
+pub mod objects;
 pub mod patch;
 pub mod pick;
 pub mod push;
 pub mod refs;
 pub mod remote;
 pub mod repo;
+pub mod sign;
+pub mod sparse;
 pub mod stash;
+pub mod submodules;
 pub mod time;
 pub mod worktree;
+pub mod worktrees;
 
 pub use flat::{FlatEntry, FlatTree, PathChange};
 pub use repo::{HeadState, Repo};

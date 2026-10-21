@@ -102,10 +102,26 @@ impl Repo {
         Ok(summary)
     }
 
+    /// Clone `url` into `path` without checking anything out (no index, empty worktree).
+    pub fn clone_from_no_checkout(url: &str, path: &Path) -> Result<Repo> {
+        if path.exists() && std::fs::read_dir(path).map(|mut d| d.next().is_some()).unwrap_or(false) {
+            bail!("destination path '{}' already exists and is not an empty directory", path.display());
+        }
+        std::fs::create_dir_all(path).with_context(|| format!("could not create {}", path.display()))?;
+        let mut prepare = gix::prepare_clone(url, path).with_context(|| format!("could not prepare clone of {url}"))?;
+        let (repo, _) = prepare
+            .fetch_only(gix::progress::Discard, &NEVER_INTERRUPT)
+            .with_context(|| format!("could not fetch {url}"))?;
+        Ok(Repo::from_gix(repo))
+    }
+
     /// Clone `url` into `path` and check out the default branch.
     pub fn clone_from(url: &str, path: &Path) -> Result<Repo> {
         if path.exists() && std::fs::read_dir(path).map(|mut d| d.next().is_some()).unwrap_or(false) {
             bail!("destination path '{}' already exists and is not an empty directory", path.display());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| format!("could not create {}", parent.display()))?;
         }
         let mut prepare = gix::prepare_clone(url, path).with_context(|| format!("could not prepare clone of {url}"))?;
         let (mut checkout, _) = prepare

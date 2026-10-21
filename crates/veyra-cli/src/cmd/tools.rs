@@ -722,7 +722,7 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
             name: "Storage",
             level: if needs_gc { Level::Warn } else { Level::Pass },
             evidence,
-            fix: needs_gc.then(|| "git gc   (safe: Veyra's journal objects are protected by refs/veyra/keep)".into()),
+            fix: needs_gc.then(|| "veyra maintenance run".into()),
         });
     }
 
@@ -816,7 +816,7 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
     {
         let log = veyra_ops::OpLog::open(&repo)?;
         let ops = log.operations()?;
-        let keep = repo.ref_target(veyra_ops::KEEP_REF)?;
+        let keep = repo.ref_target(&repo.keep_ref())?;
         let lock = repo.veyra_dir().join("lock");
         let level = if !ops.is_empty() && keep.is_none() {
             Level::Warn
@@ -839,11 +839,7 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
         });
     }
 
-    // Hooks and line endings
-    let caveats = repo.commit_caveats();
-    if !caveats.is_empty() {
-        checks.push(Check { name: "Compatibility", level: Level::Info, evidence: caveats.join("; "), fix: None });
-    }
+    // Line endings
     if cfg!(windows) && repo.config_get("core.autocrlf").is_none() && repo.config_get("core.eol").is_none() {
         checks.push(Check {
             name: "Line endings",
@@ -982,6 +978,513 @@ pub fn show_ref(ctx: &Ctx) -> Result<()> {
     let repo = ctx.repo()?;
     for (name, id) in repo.all_refs()? {
         anstream::println!("{id} {name}");
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------------
+// verify
+
+fn print_verification(label: &str, v: &veyra_core::sign::Verification) -> bool {
+    match &v.outcome {
+        None => {
+            anstream::println!("{}  {label}  {}", ui::yellow("UNSIGNED"), ui::dim("no signature"));
+            false
+        }
+        Some(o) => {
+            let tag = if o.valid { ui::green("GOOD    ") } else { ui::red("BAD     ") };
+            let who = o.signer.clone().or(o.key.clone()).unwrap_or_else(|| "(unknown signer)".into());
+            anstream::println!("{tag}  {label}  {} {who} [{}, trust: {}]", o.format, o.status, o.trust);
+            o.valid
+        }
+    }
+}
+
+pub fn verify(ctx: &Ctx, args: crate::cli::VerifyArgs) -> Result<()> {
+    use crate::cli::VerifyCommand;
+    let repo = ctx.repo()?;
+    let json_of = |label: String, v: &veyra_core::sign::Verification| {
+        json!({
+            "object": v.id.to_string(), "label": label, "signed": v.outcome.is_some(),
+            "valid": v.outcome.as_ref().is_some_and(|o| o.valid),
+            "format": v.outcome.as_ref().map(|o| o.format.clone()),
+            "status": v.outcome.as_ref().map(|o| o.status.clone()),
+            "trust": v.outcome.as_ref().map(|o| o.trust.clone()),
+            "signer": v.outcome.as_ref().and_then(|o| o.signer.clone()),
+        })
+    };
+    match (args.command, args.history) {
+        (Some(VerifyCommand::Commit { revision }), _) => {
+            let id = repo.rev_parse_commit(revision.as_deref().unwrap_or("HEAD"))?;
+            let v = repo.verify_commit(id)?;
+            if ctx.json {
+                ui::json(&json_of(veyra_core::short(&id), &v));
+            } else {
+                let ok = print_verification(&veyra_core::short(&id), &v);
+                if let Some(o) = &v.outcome
+                    && !o.output.is_empty()
+                {
+                    anstream::println!("{}", ui::dim(&o.output));
+                }
+                if !ok {
+                    return Err(Reported.into());
+                }
+            }
+            if !v.outcome.as_ref().is_some_and(|o| o.valid) {
+                return Err(Reported.into());
+            }
+        }
+        (Some(VerifyCommand::Tag { name }), _) => {
+            let id = repo.rev_parse(&name)?;
+            let v = repo.verify_tag(id)?;
+            if ctx.json {
+                ui::json(&json_of(name.clone(), &v));
+            } else {
+                print_verification(&name, &v);
+            }
+            if !v.outcome.as_ref().is_some_and(|o| o.valid) {
+                return Err(Reported.into());
+            }
+        }
+        (None, true) => {
+            let start = repo.rev_parse_commit(args.rev.as_deref().unwrap_or("HEAD"))?;
+            let commits = repo.log(&[start], Some(args.max_count))?;
+            let mut rows = Vec::new();
+            let (mut good, mut bad, mut unsigned) = (0, 0, 0);
+            for c in &commits {
+                let v = repo.verify_commit(c.id)?;
+                match &v.outcome {
+                    None => unsigned += 1,
+                    Some(o) if o.valid => good += 1,
+                    Some(_) => bad += 1,
+                }
+                if ctx.json {
+                    rows.push(json_of(c.summary().to_owned(), &v));
+                } else {
+                    print_verification(&format!("{} {}", veyra_core::short(&c.id), c.summary()), &v);
+                }
+            }
+            if ctx.json {
+                ui::json(&json!({"commits": rows, "good": good, "bad": bad, "unsigned": unsigned}));
+            } else {
+                anstream::println!("\n{good} good, {bad} bad, {unsigned} unsigned (of {} commits)", commits.len());
+            }
+            if bad > 0 {
+                return Err(Reported.into());
+            }
+        }
+        (None, false) if args.provenance => {
+            let id = repo.rev_parse_commit(args.rev.as_deref().unwrap_or("HEAD"))?;
+            return show_attestations(ctx, &repo, id, true);
+        }
+        (None, false) => {
+            bail!("usage: veyra verify commit [rev] | verify tag <name> | verify --history | verify --provenance")
+        }
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------------
+// storage & maintenance
+
+pub fn storage(ctx: &Ctx, command: crate::cli::StorageCommand) -> Result<()> {
+    let repo = ctx.repo()?;
+    match command {
+        crate::cli::StorageCommand::Stats => {
+            let s = repo.storage_stats()?;
+            if ctx.json {
+                ui::json(&json!({
+                    "loose_objects": s.loose_objects, "loose_bytes": s.loose_bytes, "packs": s.packs,
+                    "pack_bytes": s.pack_bytes, "loose_also_packed": s.loose_also_packed,
+                }));
+            } else {
+                anstream::println!(
+                    "count: {}\nsize: {}\nin-pack loose copies: {}\npacks: {}\nsize-pack: {}",
+                    s.loose_objects,
+                    human(s.loose_bytes),
+                    s.loose_also_packed,
+                    s.packs,
+                    human(s.pack_bytes)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn maintenance(ctx: &Ctx, command: crate::cli::MaintenanceCommand) -> Result<()> {
+    use crate::cli::MaintenanceCommand;
+    let repo = ctx.repo()?;
+    let duration =
+        |s: &str| veyra_core::time::parse_duration(s).with_context(|| format!("invalid duration '{s}' (e.g. 2w, 14d)"));
+    match command {
+        MaintenanceCommand::PackLoose => {
+            let (removed, bytes) = repo.pack_loose_objects()?;
+            anstream::println!("Packed {} ({} loose).", plural(removed, "object"), human(bytes));
+        }
+        MaintenanceCommand::Prune { expire, dry_run } => {
+            let pruned = repo.prune_loose(duration(&expire)?, dry_run)?;
+            for id in pruned.iter().take(20) {
+                anstream::println!("{} {id}", if dry_run { "would prune" } else { "pruned" });
+            }
+            anstream::println!(
+                "{} {} unreachable loose object(s) older than {expire}.",
+                if dry_run { "Would prune" } else { "Pruned" },
+                pruned.len()
+            );
+        }
+        MaintenanceCommand::Run { prune_expire } => {
+            let before = repo.storage_stats()?;
+            let (packed, bytes) = repo.pack_loose_objects()?;
+            let pruned = repo.prune_loose(duration(&prune_expire)?, false)?;
+            let after = repo.storage_stats()?;
+            if ctx.json {
+                ui::json(
+                    &json!({"packed": packed, "pruned": pruned.len(), "loose_before": before.loose_objects, "loose_after": after.loose_objects, "packs": after.packs}),
+                );
+            } else {
+                anstream::println!(
+                    "Packed {} ({}), pruned {} unreachable.",
+                    plural(packed, "loose object"),
+                    human(bytes),
+                    pruned.len()
+                );
+                anstream::println!(
+                    "Loose objects: {} → {}; packs: {} ({}).",
+                    before.loose_objects,
+                    after.loose_objects,
+                    after.packs,
+                    human(after.pack_bytes)
+                );
+                ui::hint("Veyra's journal snapshots are reachable through refs/veyra/keep, so they are never pruned");
+            }
+        }
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------------
+// worktrees
+
+pub fn worktree(ctx: &Ctx, command: crate::cli::WorktreeCommand) -> Result<()> {
+    use crate::cli::WorktreeCommand;
+    use veyra_core::worktrees::NewWorktreeHead;
+    let repo = ctx.repo()?;
+    match command {
+        WorktreeCommand::Add { path, commitish, new_branch, detach } => {
+            let dest = if path.is_absolute() { path.clone() } else { ctx.cwd.join(&path) };
+            let head = if detach {
+                NewWorktreeHead::Detached(repo.rev_parse_commit(commitish.as_deref().unwrap_or("HEAD"))?)
+            } else if let Some(name) = new_branch {
+                NewWorktreeHead::NewBranch {
+                    name,
+                    start: repo.rev_parse_commit(commitish.as_deref().unwrap_or("HEAD"))?,
+                }
+            } else if let Some(c) = commitish {
+                if repo.ref_target(&format!("refs/heads/{c}"))?.is_some() {
+                    NewWorktreeHead::Branch(c)
+                } else {
+                    NewWorktreeHead::Detached(repo.rev_parse_commit(&c)?)
+                }
+            } else {
+                let name = dest.file_name().context("invalid worktree path")?.to_string_lossy().into_owned();
+                if repo.ref_target(&format!("refs/heads/{name}"))?.is_some() {
+                    NewWorktreeHead::Branch(name)
+                } else {
+                    NewWorktreeHead::NewBranch {
+                        name,
+                        start: repo.head_commit_id()?.context("HEAD has no commits yet")?,
+                    }
+                }
+            };
+            let label = match &head {
+                NewWorktreeHead::Branch(b) | NewWorktreeHead::NewBranch { name: b, .. } => format!("branch '{b}'"),
+                NewWorktreeHead::Detached(id) => format!("detached HEAD {}", veyra_core::short(id)),
+            };
+            let created = journal(ctx, &repo, "worktree", false, || {
+                let p = repo.worktree_add(&dest, head.clone())?;
+                Ok((p, format!("add worktree {} ({label})", dest.display())))
+            })?;
+            anstream::println!("Preparing worktree ({label}) at {}", created.display());
+        }
+        WorktreeCommand::List => {
+            let list = repo.worktree_list()?;
+            if ctx.json {
+                ui::json(&json!(
+                    list.iter()
+                        .map(|w| json!({
+                            "path": w.path.display().to_string(), "id": w.id, "branch": w.branch,
+                            "head": w.head.map(|h| h.to_string()), "locked": w.locked, "prunable": w.prunable,
+                        }))
+                        .collect::<Vec<_>>()
+                ));
+                return Ok(());
+            }
+            for w in list {
+                let head = w.head.map(|h| veyra_core::short(&h)).unwrap_or_else(|| "-------".into());
+                let what = match (&w.branch, w.prunable) {
+                    (_, true) => ui::red("(prunable)"),
+                    (Some(b), _) => format!("[{b}]"),
+                    (None, _) => "(detached HEAD)".into(),
+                };
+                let lock = if w.locked { " locked" } else { "" };
+                anstream::println!("{}  {head} {what}{lock}", w.path.display());
+            }
+        }
+        WorktreeCommand::Remove { path, force } => {
+            let target = if path.is_absolute() { path.clone() } else { ctx.cwd.join(&path) };
+            if force {
+                ctx.confirm_destructive("worktree remove --force")?;
+            }
+            journal(ctx, &repo, "worktree", false, || {
+                repo.worktree_remove(&target, force)?;
+                Ok(((), format!("remove worktree {}", target.display())))
+            })?;
+            anstream::println!("Removed worktree {}", target.display());
+        }
+        WorktreeCommand::Prune => {
+            let pruned = repo.worktree_prune()?;
+            for id in &pruned {
+                anstream::println!("Removing worktrees/{id}: gitdir file points to a non-existent location");
+            }
+            if pruned.is_empty() {
+                anstream::println!("Nothing to prune.");
+            }
+        }
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------------
+// submodules
+
+pub fn submodule(ctx: &Ctx, command: crate::cli::SubmoduleCommand) -> Result<()> {
+    use crate::cli::SubmoduleCommand;
+    let repo = ctx.repo()?;
+    match command {
+        SubmoduleCommand::Status => {
+            let list = repo.submodule_list()?;
+            if ctx.json {
+                ui::json(&json!(list.iter().map(|s| json!({
+                    "name": s.name, "path": s.path, "url": s.url,
+                    "recorded": s.recorded.map(|c| c.to_string()), "checked_out": s.checked_out.map(|c| c.to_string()),
+                    "status": s.status_char().to_string(),
+                })).collect::<Vec<_>>()));
+                return Ok(());
+            }
+            for s in list {
+                let id = s.checked_out.or(s.recorded).map(|c| c.to_string()).unwrap_or_else(|| "0".repeat(40));
+                anstream::println!("{}{id} {}", s.status_char(), s.path);
+            }
+        }
+        SubmoduleCommand::Init { paths } => {
+            for name in repo.submodule_init(&paths)? {
+                anstream::println!("Submodule '{name}' registered");
+            }
+        }
+        SubmoduleCommand::Update { init, recursive, paths } => {
+            let changed = journal(ctx, &repo, "submodule", false, || {
+                let c = repo.submodule_update(init, recursive, &paths)?;
+                let n = c.len();
+                Ok((c, format!("submodule update: {}", plural(n, "submodule"))))
+            })?;
+            for (path, id) in &changed {
+                anstream::println!("Submodule path '{path}': checked out '{id}'");
+            }
+            if changed.is_empty() {
+                anstream::println!("Submodules are up to date.");
+            }
+        }
+        SubmoduleCommand::Add { url, path } => {
+            let path = match path {
+                Some(p) => p,
+                None => url
+                    .trim_end_matches('/')
+                    .trim_end_matches(".git")
+                    .rsplit(['/', '\\', ':'])
+                    .next()
+                    .unwrap_or("submodule")
+                    .to_owned(),
+            };
+            let head = journal(ctx, &repo, "submodule", false, || {
+                let head = repo.submodule_add(&url, &path)?;
+                Ok((head, format!("add submodule {path}")))
+            })?;
+            anstream::println!(
+                "Added submodule '{path}' at {} (staged with .gitmodules; commit to record it)",
+                veyra_core::short(&head)
+            );
+        }
+        SubmoduleCommand::Foreach { command } => repo.submodule_foreach(&command)?,
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------------
+// sparse checkout
+
+pub fn sparse(ctx: &Ctx, command: crate::cli::SparseCommand) -> Result<()> {
+    use crate::cli::SparseCommand;
+    let repo = ctx.repo()?;
+    match command {
+        SparseCommand::Set { dirs, scope } => {
+            let dirs = match scope {
+                Some(name) => {
+                    let text = std::fs::read_to_string(repo.workdir()?.join(".veyra/scopes.toml"))
+                        .context("no .veyra/scopes.toml in this repository")?;
+                    veyra_core::sparse::Scopes::parse(&text)?.get(&name)?.paths.clone()
+                }
+                None => dirs,
+            };
+            if dirs.is_empty() {
+                bail!("name at least one directory (or --scope)");
+            }
+            let (written, removed) = journal(ctx, &repo, "sparse", true, || {
+                let r = repo.sparse_set(&dirs)?;
+                Ok((r, format!("sparse set {}", dirs.join(" "))))
+            })?;
+            anstream::println!("Sparse checkout: {} ({written} files written, {removed} removed)", dirs.join(", "));
+        }
+        SparseCommand::Add { dirs } => {
+            let mut all = repo.sparse()?.map(|s| s.dirs).unwrap_or_default();
+            all.extend(dirs);
+            let (written, _) = journal(ctx, &repo, "sparse", true, || {
+                let r = repo.sparse_set(&all)?;
+                Ok((r, format!("sparse add -> {}", all.join(" "))))
+            })?;
+            anstream::println!("Sparse checkout: {} ({written} files written)", all.join(", "));
+        }
+        SparseCommand::List => match repo.sparse()? {
+            Some(s) => s.dirs.iter().for_each(|d| anstream::println!("{d}")),
+            None => anstream::println!("Sparse checkout is not enabled."),
+        },
+        SparseCommand::Disable => {
+            let written = journal(ctx, &repo, "sparse", true, || {
+                let n = repo.sparse_disable()?;
+                Ok((n, "sparse disable".to_owned()))
+            })?;
+            anstream::println!("Sparse checkout disabled ({written} files written).");
+        }
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------------
+// attestations
+
+fn show_attestations(ctx: &Ctx, repo: &Repo, commit: ObjectId, check: bool) -> Result<()> {
+    use veyra_core::attest::SignatureCheck;
+    let list = repo.attestations(commit)?;
+    let mut bad = 0;
+    let mut rows = Vec::new();
+    for env in &list {
+        let check_result = if check { repo.check_attestation(env)? } else { SignatureCheck::Unsigned };
+        if matches!(check_result, SignatureCheck::Bad(_)) {
+            bad += 1;
+        }
+        let status = match (&env.signature, &check_result) {
+            (None, _) => "unsigned".to_owned(),
+            (Some(_), SignatureCheck::Good) => "signature good".to_owned(),
+            (Some(_), SignatureCheck::Bad(why)) => format!("signature BAD: {why}"),
+            (Some(_), SignatureCheck::Unsigned) => "signed (not checked)".to_owned(),
+        };
+        if ctx.json {
+            rows.push(json!({"statement": env.statement, "signed": env.signature.is_some(), "status": status}));
+        } else {
+            let p = &env.statement["predicate"];
+            let detail = match env.predicate_type() {
+                veyra_core::attest::TEST_PREDICATE => format!(
+                    "test `{}` {} in {} ms",
+                    p["command"].as_str().unwrap_or("?"),
+                    if p["success"].as_bool() == Some(true) { ui::green("passed") } else { ui::red("failed") },
+                    p["duration_ms"]
+                ),
+                veyra_core::attest::REVIEW_PREDICATE => format!(
+                    "review by {}: {}",
+                    p["reviewer"].as_str().unwrap_or("?"),
+                    p["decision"].as_str().unwrap_or("?")
+                ),
+                other => other.to_owned(),
+            };
+            anstream::println!("  {detail}  {}", ui::dim(&format!("[{status}]")));
+        }
+    }
+    if ctx.json {
+        ui::json(&json!({"commit": commit.to_string(), "attestations": rows, "bad": bad}));
+    } else if list.is_empty() {
+        anstream::println!("No attestations for {}.", veyra_core::short(&commit));
+    } else {
+        anstream::println!("{} for {}.", plural(list.len(), "attestation"), veyra_core::short(&commit));
+    }
+    if bad > 0 {
+        return Err(Reported.into());
+    }
+    Ok(())
+}
+
+pub fn attest(ctx: &Ctx, command: crate::cli::AttestCommand) -> Result<()> {
+    use crate::cli::AttestCommand;
+    use veyra_core::attest::{REVIEW_PREDICATE, TEST_PREDICATE, statement};
+    let repo = ctx.repo()?;
+    let now = jiff::Timestamp::now().to_string();
+    match command {
+        AttestCommand::Run { rev, sign, command } => {
+            let commit = repo.rev_parse_commit(rev.as_deref().unwrap_or("HEAD"))?;
+            let at_head = repo.head_commit_id()? == Some(commit);
+            let clean = repo.worktree_changes()?.is_clean() && repo.flat_index()? == repo.flat_head()?;
+            let line = command.join(" ");
+            let started = std::time::Instant::now();
+            let mut shell = veyra_core::gix::path::env::shell_command();
+            shell.arg("-c").arg(&line).current_dir(repo.workdir()?);
+            let status = shell.status().with_context(|| format!("could not run `{line}`"))?;
+            let predicate = json!({
+                "command": line,
+                "exit_code": status.code(),
+                "success": status.success(),
+                "duration_ms": started.elapsed().as_millis() as u64,
+                "finished_at": now,
+                // The result only describes the commit if it ran on exactly that tree.
+                "ran_on_commit": at_head,
+                "worktree_clean": clean,
+                "runner": { "os": std::env::consts::OS, "arch": std::env::consts::ARCH, "veyra": env!("CARGO_PKG_VERSION") },
+            });
+            repo.add_attestation(commit, statement(commit, TEST_PREDICATE, predicate), sign)?;
+            anstream::println!(
+                "Attested: `{line}` {} for {}{}",
+                if status.success() { ui::green("passed") } else { ui::red("failed") },
+                veyra_core::short(&commit),
+                if at_head && clean {
+                    String::new()
+                } else {
+                    ui::yellow(" (note: not run on a clean checkout of that commit)")
+                }
+            );
+            if !status.success() {
+                return Err(Reported.into());
+            }
+        }
+        AttestCommand::Review { rev, reviewer, reject, message, sign } => {
+            let commit = repo.rev_parse_commit(rev.as_deref().unwrap_or("HEAD"))?;
+            let reviewer = reviewer
+                .or_else(|| repo.identity().map(|(n, e)| format!("{n} <{e}>")))
+                .context("who reviewed? pass --reviewer")?;
+            let predicate = json!({
+                "reviewer": reviewer,
+                "decision": if reject { "rejected" } else { "approved" },
+                "note": message,
+                "reviewed_at": now,
+            });
+            repo.add_attestation(commit, statement(commit, REVIEW_PREDICATE, predicate), sign)?;
+            anstream::println!(
+                "Recorded review of {} ({}).",
+                veyra_core::short(&commit),
+                if reject { "rejected" } else { "approved" }
+            );
+        }
+        AttestCommand::List { rev } => {
+            let commit = repo.rev_parse_commit(rev.as_deref().unwrap_or("HEAD"))?;
+            show_attestations(ctx, &repo, commit, false)?;
+        }
     }
     Ok(())
 }

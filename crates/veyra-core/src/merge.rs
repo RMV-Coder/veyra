@@ -119,7 +119,8 @@ impl Repo {
 
         if !unresolved {
             self.checkout_tree(merged_tree, false)?;
-            let commit = self.write_merge_commit(merged_tree, &[ours, theirs], &summary)?;
+            let commit =
+                self.write_merge_commit(merged_tree, &[ours, theirs], &summary, crate::sign::SignMode::Config)?;
             return Ok(MergeOutcome::Merged { commit });
         }
 
@@ -162,7 +163,13 @@ impl Repo {
         Ok(paths)
     }
 
-    fn write_merge_commit(&self, tree: ObjectId, parents: &[ObjectId], message: &str) -> Result<ObjectId> {
+    fn write_merge_commit(
+        &self,
+        tree: ObjectId,
+        parents: &[ObjectId],
+        message: &str,
+        sign: crate::sign::SignMode,
+    ) -> Result<ObjectId> {
         self.require_identity()?;
         let committer: gix::actor::Signature =
             self.git.committer().ok_or_else(|| anyhow!("no committer"))??.to_owned()?;
@@ -176,7 +183,7 @@ impl Repo {
             parents: parents.iter().copied().collect(),
             extra_headers: Default::default(),
         };
-        let id = self.git.write_object(&commit)?.detach();
+        let id = self.write_commit_object(commit, self.should_sign(sign))?;
         self.update_head_target(
             id,
             Some(parents[0]),
@@ -197,7 +204,7 @@ impl Repo {
         }
         let tree = self.write_flat(&crate::flat::flat_from_index_state(&index))?;
         let message = crate::commit::add_trailers(&request.message, &request.trailers);
-        let id = self.write_merge_commit(tree, &[ours, theirs], &message)?;
+        let id = self.write_merge_commit(tree, &[ours, theirs], &message, request.sign)?;
         self.clear_merge_state()?;
         Ok(id)
     }

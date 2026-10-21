@@ -19,8 +19,8 @@ use crate::{Ctx, ui};
 pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
     use Command::*;
     match command {
-        Init { directory, initial_branch } => repo::init(ctx, directory, initial_branch),
-        Clone { url, directory } => repo::clone(ctx, &url, directory),
+        Init { directory, initial_branch, object_format } => repo::init(ctx, directory, initial_branch, object_format),
+        Clone { url, directory, scope, sparse } => repo::clone(ctx, &url, directory, scope, sparse),
         Status { short } => repo::status(ctx, short),
         Add { paths, patch: true, .. } => repo::add_patch(ctx, paths),
         Add { paths, all, update, force, patch: false } => repo::add(ctx, paths, all, update, force),
@@ -68,6 +68,13 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
         Checkpoint(args) => safety::checkpoint(ctx, args),
         Explain { command } => crate::explain::run(ctx, &command),
         Doctor => tools::doctor(ctx),
+        Verify(args) => tools::verify(ctx, args),
+        Attest { command } => tools::attest(ctx, command),
+        Storage { command } => tools::storage(ctx, command),
+        Worktree { command } => tools::worktree(ctx, command),
+        Sparse { command } => tools::sparse(ctx, command),
+        Submodule { command } => tools::submodule(ctx, command.unwrap_or(crate::cli::SubmoduleCommand::Status)),
+        Maintenance { command } => tools::maintenance(ctx, command),
         Security(args) => tools::security(ctx, args.command),
         Intent(args) => tools::intent(ctx, args.command),
         Config(args) => tools::config(ctx, args),
@@ -88,10 +95,22 @@ pub(crate) fn journal<T>(
     touches_worktree: bool,
     f: impl FnOnce() -> Result<(T, String)>,
 ) -> Result<T> {
+    let profile = std::env::var_os("VEYRA_PROFILE").is_some();
+    let t0 = std::time::Instant::now();
     let log = OpLog::open(repo)?;
     let tx = log.begin(kind, &ctx.argv, touches_worktree)?;
+    let t1 = std::time::Instant::now();
     let (value, summary) = f()?;
+    let t2 = std::time::Instant::now();
     tx.commit(&summary)?;
+    if profile {
+        anstream::eprintln!(
+            "[profile] journal begin {:?} · {kind} {:?} · journal commit {:?}",
+            t1 - t0,
+            t2 - t1,
+            t2.elapsed()
+        );
+    }
     Ok(value)
 }
 

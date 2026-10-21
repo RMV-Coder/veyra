@@ -34,9 +34,21 @@ pub enum Command {
         /// Name of the initial branch (default: init.defaultBranch, else `main`).
         #[arg(short = 'b', long = "initial-branch")]
         initial_branch: Option<String>,
+        /// Object id format: sha1 (default, maximally compatible) or sha256.
+        #[arg(long, value_name = "sha1|sha256")]
+        object_format: Option<String>,
     },
     /// Clone a repository into a new directory.
-    Clone { url: String, directory: Option<std::path::PathBuf> },
+    Clone {
+        url: String,
+        directory: Option<std::path::PathBuf>,
+        /// Check out only this scope from the repository's .veyra/scopes.toml.
+        #[arg(long)]
+        scope: Option<String>,
+        /// Check out only these directories (cone-mode sparse checkout).
+        #[arg(long, value_name = "dir")]
+        sparse: Vec<String>,
+    },
     /// Show the working tree status.
     Status {
         /// Short format (`XY path`).
@@ -274,6 +286,38 @@ pub enum Command {
     Checkpoint(CheckpointArgs),
 
     // ----- intelligence & diagnostics -----
+    /// Verify signatures of commits and tags.
+    Verify(VerifyArgs),
+    /// Record verifiable evidence about commits (in-toto statements in git notes).
+    Attest {
+        #[command(subcommand)]
+        command: AttestCommand,
+    },
+    /// Restrict the working tree to some directories (Git's cone-mode sparse checkout).
+    Sparse {
+        #[command(subcommand)]
+        command: SparseCommand,
+    },
+    /// Initialize, update or inspect submodules.
+    Submodule {
+        #[command(subcommand)]
+        command: Option<SubmoduleCommand>,
+    },
+    /// Manage multiple working trees attached to this repository.
+    Worktree {
+        #[command(subcommand)]
+        command: WorktreeCommand,
+    },
+    /// Repository storage information.
+    Storage {
+        #[command(subcommand)]
+        command: StorageCommand,
+    },
+    /// Keep the repository fast and small (packing, pruning) — no `git gc` needed.
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommand,
+    },
     /// Explain what a git or veyra command does, how dangerous it is, and how to recover.
     Explain {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
@@ -368,9 +412,15 @@ pub struct CommitArgs {
     /// Commit even if the secret scan finds high-confidence secrets.
     #[arg(long)]
     pub allow_secrets: bool,
-    /// Skip the secret scan and intent verification.
+    /// Skip hooks, the secret scan and intent verification.
     #[arg(long)]
     pub no_verify: bool,
+    /// Sign the commit (gpg, x509 or ssh, per `gpg.format`).
+    #[arg(short = 'S', long = "gpg-sign")]
+    pub gpg_sign: bool,
+    /// Don't sign, even if `commit.gpgSign` is set.
+    #[arg(long)]
+    pub no_gpg_sign: bool,
 }
 
 #[derive(Args, Debug)]
@@ -493,6 +543,9 @@ pub struct TagArgs {
     pub delete: bool,
     #[arg(short, long)]
     pub force: bool,
+    /// Make a signed, annotated tag.
+    #[arg(short = 's', long)]
+    pub sign: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -805,4 +858,148 @@ pub enum StashCommand {
     Drop { entry: Option<String> },
     /// Delete all entries.
     Clear,
+}
+
+#[derive(Args, Debug)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct VerifyArgs {
+    #[command(subcommand)]
+    pub command: Option<VerifyCommand>,
+    /// Report the signature status of every commit in the history.
+    #[arg(long)]
+    pub history: bool,
+    /// Show and check the attestations recorded for a commit.
+    #[arg(long)]
+    pub provenance: bool,
+    /// Where the history starts (default: HEAD).
+    #[arg(long, value_name = "rev")]
+    pub rev: Option<String>,
+    #[arg(short = 'n', long, default_value_t = 50)]
+    pub max_count: usize,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum VerifyCommand {
+    /// Verify one commit's signature (`git verify-commit`).
+    Commit { revision: Option<String> },
+    /// Verify an annotated tag's signature (`git verify-tag`).
+    Tag { name: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum StorageCommand {
+    /// Object counts and sizes (`git count-objects -v`).
+    Stats,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MaintenanceCommand {
+    /// Pack loose objects, then prune unreachable ones older than the grace period.
+    Run {
+        /// Grace period for unreachable loose objects.
+        #[arg(long, default_value = "2w")]
+        prune_expire: String,
+    },
+    /// Move loose objects into a new pack.
+    PackLoose,
+    /// Delete unreachable loose objects older than the grace period.
+    Prune {
+        #[arg(long, default_value = "2w")]
+        expire: String,
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorktreeCommand {
+    /// Create a worktree at <path> (branch defaults to the directory name, created from HEAD if new).
+    Add {
+        path: std::path::PathBuf,
+        /// An existing branch or commit to check out.
+        commitish: Option<String>,
+        /// Create this new branch.
+        #[arg(short = 'b')]
+        new_branch: Option<String>,
+        /// Detach HEAD at the commit.
+        #[arg(long)]
+        detach: bool,
+    },
+    /// List worktrees.
+    List,
+    /// Remove a worktree.
+    Remove {
+        path: std::path::PathBuf,
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Forget worktrees whose directories were deleted.
+    Prune,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SubmoduleCommand {
+    /// Show each submodule's recorded and checked-out commit.
+    Status,
+    /// Copy submodule URLs from .gitmodules into .git/config.
+    Init { paths: Vec<String> },
+    /// Clone missing submodules and check out the recorded commits.
+    Update {
+        #[arg(long)]
+        init: bool,
+        #[arg(long)]
+        recursive: bool,
+        paths: Vec<String>,
+    },
+    /// Add a repository as a submodule.
+    Add { url: String, path: Option<String> },
+    /// Run a shell command in each checked-out submodule.
+    Foreach { command: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SparseCommand {
+    /// Check out only these directories (plus root files).
+    Set {
+        dirs: Vec<String>,
+        /// Use a named scope from .veyra/scopes.toml.
+        #[arg(long)]
+        scope: Option<String>,
+    },
+    /// Add directories to the sparse checkout.
+    Add { dirs: Vec<String> },
+    /// Show the selected directories.
+    List,
+    /// Check out everything again.
+    Disable,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AttestCommand {
+    /// Run a command (e.g. your tests) and attest its result for a commit.
+    Run {
+        #[arg(long)]
+        rev: Option<String>,
+        /// Sign the attestation with your commit-signing key.
+        #[arg(long)]
+        sign: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Attest a code review decision for a commit.
+    Review {
+        #[arg(long)]
+        rev: Option<String>,
+        #[arg(long)]
+        reviewer: Option<String>,
+        /// Record a rejection instead of an approval.
+        #[arg(long)]
+        reject: bool,
+        #[arg(short, long)]
+        message: Option<String>,
+        #[arg(long)]
+        sign: bool,
+    },
+    /// List a commit's attestations.
+    List { rev: Option<String> },
 }

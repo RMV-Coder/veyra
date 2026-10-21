@@ -663,7 +663,7 @@ impl Repo {
                 parents: parents.into_iter().collect(),
                 extra_headers: Default::default(),
             };
-            let id = self.git.write_object(&commit)?.detach();
+            let id = self.write_commit_object(commit, self.should_sign(crate::sign::SignMode::Config))?;
             self.set_head_detached(
                 id,
                 &format!("rebase ({}): {}", step.action.name(), message.lines().next().unwrap_or_default()),

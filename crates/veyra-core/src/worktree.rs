@@ -372,21 +372,46 @@ impl Repo {
         index: &gix::index::State,
         path: &BStr,
         previous_kind: Option<EntryKind>,
+        batch: &mut crate::objects::BlobBatch<'_>,
     ) -> Result<Option<(FlatEntry, gix::index::entry::Stat)>> {
-        let Some((id, kind, md)) =
-            pipeline.worktree_file_to_object(path, index).with_context(|| format!("could not read {path}"))?
-        else {
+        use gix::filter::plumbing::pipeline::convert::ToGitOutcome;
+        let rela = crate::repo::fs_path(path)?;
+        let fs_path = self.workdir()?.join(&rela);
+        let md = match std::fs::symlink_metadata(&fs_path) {
+            Ok(md) => md,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err).with_context(|| format!("could not read {path}")),
+        };
+        let (data, kind) = if md.is_symlink() {
+            let target = std::fs::read_link(&fs_path).with_context(|| format!("could not read {path}"))?;
+            (gix::path::into_bstr(target)?.as_bytes().to_vec(), EntryKind::Link)
+        } else if md.is_file() {
+            let file = std::fs::File::open(&fs_path).with_context(|| format!("could not read {path}"))?;
+            let mut data = Vec::with_capacity(md.len() as usize);
+            match pipeline
+                .convert_to_git(file, &rela, index)
+                .with_context(|| format!("clean filter failed for {path}"))?
+            {
+                ToGitOutcome::Unchanged(mut f) => {
+                    f.read_to_end(&mut data)?;
+                }
+                ToGitOutcome::Buffer(buf) => data.extend_from_slice(buf),
+                ToGitOutcome::Process(mut r) => {
+                    r.read_to_end(&mut data)?;
+                }
+            }
+            let kind = if gix::fs::is_executable(&md) { EntryKind::BlobExecutable } else { EntryKind::Blob };
+            (data, kind)
+        } else {
+            // Directories (nested repositories) and special files are not snapshotted or added implicitly.
             return Ok(None);
         };
-        if kind == EntryKind::Commit {
-            return Ok(None); // nested repositories are not snapshotted or added implicitly
-        }
+        let id = batch.add(data)?;
         let caps = self.git.filesystem_options()?;
         let kind = adjust_kind(previous_kind, kind, &caps);
-        let meta = gix::index::fs::Metadata::from_path_no_follow(&self.workdir()?.join(crate::repo::fs_path(path)?))
+        let meta = gix::index::fs::Metadata::from_path_no_follow(&fs_path)
             .with_context(|| format!("could not stat {path}"))?;
         let stat = gix::index::entry::Stat::from_fs(&meta).unwrap_or_default();
-        let _ = md;
         Ok(Some((FlatEntry { kind, id }, stat)))
     }
 
@@ -406,6 +431,7 @@ impl Repo {
             && changes.conflicted.is_empty())
         {
             let (mut pipeline, _) = self.git.filter_pipeline(None)?;
+            let mut batch = crate::objects::BlobBatch::new(self);
             let workdir = self.workdir()?.to_owned();
             for path in changes.deleted.iter() {
                 if flat.remove(path).is_some() {
@@ -424,7 +450,7 @@ impl Repo {
                     continue;
                 }
                 let previous = flat.get(path).map(|e| e.kind);
-                match self.hash_worktree_file(&mut pipeline, &index, path.as_ref(), previous)? {
+                match self.hash_worktree_file(&mut pipeline, &index, path.as_ref(), previous, &mut batch)? {
                     Some((entry, _)) => {
                         if flat.insert(path.clone(), entry) != Some(entry) {
                             changed += 1;
@@ -437,6 +463,7 @@ impl Repo {
                     }
                 }
             }
+            batch.finish()?;
         }
         let tree = self.write_flat(&flat)?;
         Ok(Snapshot { tree, flat, skipped, changed_vs_index: changed })
@@ -482,6 +509,17 @@ impl Repo {
         &self,
         changes: &[(BString, Option<FlatEntry>)],
     ) -> Result<BTreeMap<BString, gix::index::entry::Stat>> {
+        let sparse = self.sparse()?;
+        self.write_worktree_with(changes, sparse.as_ref())
+    }
+
+    /// Like [`Repo::write_worktree`], with an explicit sparse cone: paths outside it are never
+    /// written (but may be deleted).
+    pub fn write_worktree_with(
+        &self,
+        changes: &[(BString, Option<FlatEntry>)],
+        sparse: Option<&crate::sparse::Sparse>,
+    ) -> Result<BTreeMap<BString, gix::index::entry::Stat>> {
         let workdir = self.workdir()?.to_owned();
         let caps = self.git.filesystem_options()?;
         let mut stats = BTreeMap::new();
@@ -514,6 +552,9 @@ impl Repo {
         let (mut pipeline, _index) = self.git.filter_pipeline(None)?;
         for (path, entry) in changes {
             let Some(entry) = entry else { continue };
+            if sparse.is_some_and(|s| !s.includes(path.as_ref())) {
+                continue; // outside the sparse checkout: stays skip-worktree
+            }
             let fs_path = workdir.join(crate::repo::fs_path(path.as_bstr())?);
             if let Some(parent) = fs_path.parent() {
                 ensure_dir(&workdir, parent)?;

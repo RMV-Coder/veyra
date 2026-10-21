@@ -38,6 +38,7 @@ impl Repo {
                 old_entries.insert(entry.path(&old), (entry, FlatEntry { kind, id: entry.id }));
             }
         }
+        let sparse = self.sparse()?;
         let mut state = gix::index::State::new(self.object_hash());
         for (path, entry) in flat {
             let stat = if let Some(stat) = fresh_stats.get(path) {
@@ -49,7 +50,12 @@ impl Repo {
             } else {
                 Stat::default()
             };
-            state.dangerously_push_entry(stat, entry.id, Flags::empty(), entry.index_mode(), path.as_ref());
+            let flags = if sparse.as_ref().is_some_and(|s| !s.includes(path.as_ref())) {
+                Flags::SKIP_WORKTREE | Flags::EXTENDED
+            } else {
+                Flags::empty()
+            };
+            state.dangerously_push_entry(stat, entry.id, flags, entry.index_mode(), path.as_ref());
         }
         state.sort_entries();
         self.write_index_state(state)
@@ -69,6 +75,7 @@ impl Repo {
         let changes = self.worktree_changes()?;
         let mut index = self.load_index()?;
         let (mut pipeline, _) = self.git.filter_pipeline(None)?;
+        let mut batch = crate::objects::BlobBatch::new(self);
         let mut outcome = AddOutcome::default();
         let mut matched_args = vec![false; spec.args.len()];
         let mut note_match = |path: &BStr| {
@@ -106,7 +113,7 @@ impl Repo {
             }
             note_match(path.as_ref());
             let previous = index.entry_by_path(path.as_ref()).and_then(|e| FlatEntry::kind_from_index_mode(e.mode));
-            match self.hash_worktree_file(&mut pipeline, &index, path.as_ref(), previous)? {
+            match self.hash_worktree_file(&mut pipeline, &index, path.as_ref(), previous, &mut batch)? {
                 Some((entry, stat)) => upserts.push((path.clone(), entry, stat, is_new)),
                 None => removals.push(path.clone()),
             }
@@ -120,7 +127,7 @@ impl Repo {
             let fs_path = self.workdir()?.join(crate::repo::fs_path(rela.as_bstr())?);
             if fs_path.is_file() {
                 if force {
-                    match self.hash_worktree_file(&mut pipeline, &index, rela.as_ref(), None)? {
+                    match self.hash_worktree_file(&mut pipeline, &index, rela.as_ref(), None, &mut batch)? {
                         Some((entry, stat)) => upserts.push((rela.clone(), entry, stat, true)),
                         None => bail!("cannot add '{arg}'"),
                     }
@@ -135,6 +142,8 @@ impl Repo {
                 bail!("pathspec '{arg}' did not match any files");
             }
         }
+
+        batch.finish()?;
 
         // Apply to the index.
         let removal_set: std::collections::BTreeSet<&BString> = removals.iter().collect();

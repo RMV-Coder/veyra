@@ -13,10 +13,13 @@ default = ["https"]
 https = ["gix/blocking-http-transport-reqwest-rust-tls"]
 
 [dependencies]
-gix = { workspace = true, features = ["blocking-network-client"] }
+gix = { workspace = true, features = ["blocking-network-client", "sha256"] }
 anyhow.workspace = true
 similar.workspace = true
 jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

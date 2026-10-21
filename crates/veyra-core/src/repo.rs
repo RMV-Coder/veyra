@@ -55,8 +55,27 @@ impl Repo {
 
     /// Initialise a new repository with a worktree at `path`.
     pub fn init(path: &Path, initial_branch: Option<&str>) -> Result<Self> {
+        Self::init_with_format(path, initial_branch, None)
+    }
+
+    /// Initialise a new repository, optionally with SHA-256 object ids (`--object-format sha256`).
+    pub fn init_with_format(
+        path: &Path,
+        initial_branch: Option<&str>,
+        object_hash: Option<gix::hash::Kind>,
+    ) -> Result<Self> {
         std::fs::create_dir_all(path).with_context(|| format!("could not create {}", path.display()))?;
-        let git = gix::init(path).with_context(|| format!("could not initialise repository at {}", path.display()))?;
+        let git = match object_hash {
+            None => gix::init(path),
+            Some(kind) => gix::ThreadSafeRepository::init_opts(
+                path,
+                gix::create::Kind::WithWorktree,
+                gix::create::Options { object_hash: Some(kind), ..Default::default() },
+                gix::open::Options::default(),
+            )
+            .map(|r| r.to_thread_local()),
+        }
+        .with_context(|| format!("could not initialise repository at {}", path.display()))?;
         let repo = Repo { git };
         if let Some(branch) = initial_branch {
             let name = crate::refs::branch_full_name(branch)?;
@@ -99,7 +118,29 @@ impl Repo {
 
     /// Where Veyra keeps its local, never-pushed state.
     pub fn veyra_dir(&self) -> PathBuf {
-        self.common_dir().join("veyra")
+        // Each linked worktree keeps its own journal: their HEADs, indexes and files are separate.
+        match self.linked_worktree_id() {
+            Some(_) => self.git_dir().join("veyra"),
+            None => self.common_dir().join("veyra"),
+        }
+    }
+
+    /// The id of this linked worktree (`.git/worktrees/<id>`), or `None` for the main worktree.
+    pub fn linked_worktree_id(&self) -> Option<String> {
+        let (git_dir, common) = (self.git_dir(), self.common_dir());
+        if git_dir == common || std::fs::canonicalize(git_dir).ok() == std::fs::canonicalize(common).ok() {
+            return None;
+        }
+        git_dir.file_name().map(|n| n.to_string_lossy().into_owned())
+    }
+
+    /// The ref that keeps this worktree's journal objects alive: `refs/veyra/keep`, or
+    /// `refs/veyra/keep-<id>` for a linked worktree.
+    pub fn keep_ref(&self) -> String {
+        match self.linked_worktree_id() {
+            Some(id) => format!("refs/veyra/keep-{id}"),
+            None => "refs/veyra/keep".into(),
+        }
     }
 
     /// Path to the index file.

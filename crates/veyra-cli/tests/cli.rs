@@ -1112,3 +1112,247 @@ fn add_patch_can_split_a_hunk() {
     let staged = env.git(&["diff", "--cached"]);
     assert!(staged.contains("+FOUR") && !staged.contains("+TWO"), "{staged}");
 }
+
+/// Configure SSH signing with a fresh key; returns false if ssh-keygen is unavailable.
+fn setup_ssh_signing(env: &Env) -> bool {
+    let key = env.home.join("signing_key");
+    let ok = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "test@example.com", "-f"])
+        .arg(&key)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !ok {
+        return false;
+    }
+    let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+    let allowed = env.home.join("allowed_signers");
+    std::fs::write(&allowed, format!("test@example.com namespaces=\"git\" {}", public.trim())).unwrap();
+    let path = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");
+    env.ok(&["config", "gpg.format", "ssh"]);
+    env.ok(&["config", "user.signingkey", &path(&key)]);
+    env.ok(&["config", "gpg.ssh.allowedSignersFile", &path(&allowed)]);
+    true
+}
+
+#[test]
+fn signed_commits_and_tags_verify_in_git_and_veyra() {
+    require_git!();
+    let env = Env::new();
+    if !setup_ssh_signing(&env) {
+        eprintln!("skipping: ssh-keygen not available");
+        return;
+    }
+    env.commit_file("a.txt", "a\n", "unsigned");
+    env.write("a.txt", "b\n");
+    env.ok(&["add", "a.txt"]);
+    env.ok(&["commit", "-S", "-m", "signed"]);
+    env.git(&["verify-commit", "HEAD"]);
+    let v: serde_json::Value = serde_json::from_str(&env.ok(&["verify", "commit", "--json"])).unwrap();
+    assert_eq!(v["valid"], true, "{v}");
+    assert_eq!(v["format"], "ssh");
+
+    env.ok(&["tag", "-s", "v1.0.0", "-m", "signed release"]);
+    env.git(&["verify-tag", "v1.0.0"]);
+    env.ok(&["verify", "tag", "v1.0.0"]);
+
+    env.ok(&["config", "commit.gpgSign", "true"]);
+    env.commit_file("a.txt", "c\n", "signed by config");
+    env.git(&["verify-commit", "HEAD"]);
+    let hist: serde_json::Value = serde_json::from_str(&env.ok(&["verify", "--history", "--json"])).unwrap();
+    assert_eq!((hist["good"].as_u64(), hist["unsigned"].as_u64(), hist["bad"].as_u64()), (Some(2), Some(1), Some(0)));
+    env.veyra(&["verify", "commit", "HEAD~2"]).assert().failure();
+}
+
+#[test]
+fn maintenance_packs_and_prunes_without_losing_journal_objects() {
+    require_git!();
+    let env = Env::new();
+    for i in 0..5 {
+        env.commit_file("a.txt", &format!("version {i}\n"), &format!("c{i}"));
+    }
+    env.write("draft.txt", "only in a checkpoint\n");
+    env.ok(&["checkpoint", "-m", "keep me"]);
+    std::fs::remove_file(env.repo.join("draft.txt")).unwrap();
+    // Garbage: an unreachable blob, written by git.
+    let garbage = env.git(&["hash-object", "-w", "--stdin"]);
+    let _ = garbage;
+
+    let before: serde_json::Value = serde_json::from_str(&env.ok(&["storage", "stats", "--json"])).unwrap();
+    assert!(before["loose_objects"].as_u64().unwrap() > 10);
+    env.ok(&["maintenance", "run", "--prune-expire", "0s"]);
+    let count = env.git(&["count-objects", "-v"]);
+    assert!(count.contains("count: 0"), "everything was packed or pruned: {count}");
+    env.git(&["fsck", "--strict", "--no-dangling"]);
+    assert_eq!(env.git(&["log", "--format=%s"]).lines().count(), 5);
+
+    // The checkpoint survived because the journal keeps its objects reachable.
+    let list: serde_json::Value = serde_json::from_str(&env.ok(&["checkpoint", "list", "--json"])).unwrap();
+    let id =
+        list.as_array().unwrap().iter().find(|c| c["source"] == "keep me").unwrap()["id"].as_str().unwrap().to_owned();
+    env.ok(&["checkpoint", "restore", &id]);
+    assert_eq!(env.read("draft.txt").as_deref(), Some("only in a checkpoint\n"));
+}
+
+#[test]
+fn worktrees_have_their_own_journal() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "a\n", "base");
+    let wt = env.home.join("feature-wt");
+    env.ok(&["worktree", "add", wt.to_str().unwrap()]);
+    let listing = env.git(&["worktree", "list"]);
+    assert!(listing.contains("feature-wt") && listing.contains("[feature-wt]"), "{listing}");
+    assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "a\n");
+
+    // Work inside the linked worktree.
+    let in_wt = |args: &[&str]| -> String {
+        let mut cmd = Command::cargo_bin("veyra").unwrap();
+        env.apply(&mut cmd);
+        let out = cmd.current_dir(&wt).args(args).output().unwrap();
+        assert!(out.status.success(), "veyra {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    std::fs::write(wt.join("b.txt"), "b\n").unwrap();
+    in_wt(&["add", "b.txt"]);
+    in_wt(&["commit", "-m", "work in worktree"]);
+    assert_eq!(env.git(&["log", "-1", "--format=%s", "feature-wt"]).trim(), "work in worktree");
+    let main_ops: serde_json::Value = serde_json::from_str(&env.ok(&["op", "log", "--json"])).unwrap();
+    assert!(
+        main_ops.as_array().unwrap().iter().all(|o| o["summary"] != "commit"),
+        "the main journal doesn't see the worktree's commit"
+    );
+    in_wt(&["undo"]);
+    assert_eq!(env.git(&["log", "-1", "--format=%s", "feature-wt"]).trim(), "base");
+    env.git(&["fsck", "--strict"]);
+
+    env.ok(&["worktree", "remove", "--force", wt.to_str().unwrap()]);
+    assert!(!wt.exists());
+    assert!(!env.git(&["worktree", "list"]).contains("feature-wt"));
+}
+
+#[test]
+fn submodules_add_update_and_status() {
+    require_git!();
+    let env = Env::new();
+    // A library repository to embed.
+    let lib = env.home.join("lib");
+    git_in(&env, &env.home, &["init", "-q", "-b", "main", lib.to_str().unwrap()]);
+    std::fs::write(lib.join("lib.rs"), "pub fn lib() {}\n").unwrap();
+    git_in(&env, &lib, &["add", "lib.rs"]);
+    git_in(&env, &lib, &["commit", "-qm", "lib v1"]);
+    let lib_v1 = git_in(&env, &lib, &["rev-parse", "HEAD"]).trim().to_owned();
+
+    env.commit_file("app.rs", "fn main() {}\n", "app");
+    env.ok(&["submodule", "add", lib.to_str().unwrap(), "vendor/lib"]);
+    env.ok(&["commit", "-m", "add lib submodule"]);
+    let status = env.git(&["submodule", "status"]);
+    assert!(status.contains(&lib_v1) && status.contains("vendor/lib"), "{status}");
+    assert_eq!(env.git(&["status", "--porcelain"]), "");
+
+    // A fresh clone without submodules, completed by veyra.
+    let clone = env.home.join("clone");
+    git_in(
+        &env,
+        &env.home,
+        &["-c", "protocol.file.allow=always", "clone", "-q", env.repo.to_str().unwrap(), clone.to_str().unwrap()],
+    );
+    let mut cmd = Command::cargo_bin("veyra").unwrap();
+    env.apply(&mut cmd);
+    let out = cmd.current_dir(&clone).args(["submodule", "update", "--init"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(std::fs::read_to_string(clone.join("vendor/lib/lib.rs")).unwrap(), "pub fn lib() {}\n");
+    let st = git_in(&env, &clone, &["submodule", "status"]);
+    assert!(st.starts_with(' ') && st.contains(&lib_v1), "checked out at the recorded commit: {st}");
+}
+
+#[test]
+fn sparse_checkout_matches_git_and_clone_scope_works() {
+    require_git!();
+    let env = Env::new();
+    env.write("README.md", "root\n");
+    env.write("frontend/app.ts", "app\n");
+    env.write("backend/main.rs", "fn main() {}\n");
+    env.write("packages/ui/button.ts", "button\n");
+    env.write("packages/types/t.ts", "types\n");
+    env.write(".veyra/scopes.toml", "[scope.web]\npaths = [\"frontend\", \"packages/ui\"]\n");
+    env.ok(&["add", "-A"]);
+    env.ok(&["commit", "-m", "monorepo"]);
+
+    env.ok(&["sparse", "set", "frontend", "packages/ui"]);
+    assert_eq!(env.read("backend/main.rs"), None);
+    assert_eq!(env.read("packages/types/t.ts"), None);
+    assert_eq!(env.read("frontend/app.ts").as_deref(), Some("app\n"));
+    assert_eq!(env.git(&["status", "--porcelain"]), "", "git agrees nothing is modified or deleted");
+    assert_eq!(env.git(&["sparse-checkout", "list"]), "frontend\npackages/ui\n");
+    // Commits still contain the whole tree.
+    env.commit_file("frontend/app.ts", "app v2\n", "edit in cone");
+    assert!(env.git(&["ls-tree", "-r", "--name-only", "HEAD"]).contains("backend/main.rs"));
+
+    env.ok(&["sparse", "disable"]);
+    assert_eq!(env.read("backend/main.rs").as_deref(), Some("fn main() {}\n"));
+    assert_eq!(env.git(&["status", "--porcelain"]), "");
+
+    let clone = env.home.join("web-only");
+    env.ok(&["clone", env.repo.to_str().unwrap(), clone.to_str().unwrap(), "--scope", "web"]);
+    assert!(clone.join("frontend/app.ts").exists() && clone.join("packages/ui/button.ts").exists());
+    assert!(!clone.join("backend").exists(), "backend is outside the scope");
+    assert_eq!(git_in(&env, &clone, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn sha256_repositories_work_end_to_end() {
+    require_git!();
+    let env = Env::new();
+    let repo = env.home.join("sha256-repo");
+    env.ok(&["init", "--object-format", "sha256", repo.to_str().unwrap()]);
+    let run = |args: &[&str]| {
+        let mut cmd = Command::cargo_bin("veyra").unwrap();
+        env.apply(&mut cmd);
+        let out = cmd.current_dir(&repo).args(args).output().unwrap();
+        assert!(out.status.success(), "veyra {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+    run(&["add", "a.txt"]);
+    run(&["commit", "-m", "first sha256 commit"]);
+    std::fs::write(repo.join("a.txt"), "hello again\n").unwrap();
+    run(&["commit", "-am", "second"]);
+    run(&["undo"]);
+    assert_eq!(git_in(&env, &repo, &["rev-parse", "--show-object-format"]).trim(), "sha256");
+    assert_eq!(git_in(&env, &repo, &["rev-parse", "HEAD"]).trim().len(), 64);
+    assert_eq!(git_in(&env, &repo, &["log", "--format=%s"]), "first sha256 commit\n");
+    git_in(&env, &repo, &["fsck", "--strict"]);
+}
+
+#[test]
+fn attestations_are_git_notes_and_verify() {
+    require_git!();
+    let env = Env::new();
+    let bare = bare_origin(&env);
+    env.commit_file("a.txt", "a\n", "c1");
+    env.ok(&["attest", "run", "--", "exit 0"]);
+    env.ok(&["attest", "review", "--reviewer", "Ada <ada@example.com>", "-m", "LGTM"]);
+    env.veyra(&["attest", "run", "--", "exit 4"]).assert().failure();
+
+    let list: serde_json::Value = serde_json::from_str(&env.ok(&["attest", "list", "--json"])).unwrap();
+    let atts = list["attestations"].as_array().unwrap();
+    assert_eq!(atts.len(), 3);
+    assert_eq!(atts[0]["statement"]["_type"], "https://in-toto.io/Statement/v1");
+    assert_eq!(atts[0]["statement"]["predicate"]["success"], true);
+    assert_eq!(atts[2]["statement"]["predicate"]["exit_code"], 4);
+    let note = env.git(&["notes", "--ref", "veyra/attestations", "show", "HEAD"]);
+    assert_eq!(note.lines().count(), 3, "git reads the same notes");
+
+    if setup_ssh_signing(&env) {
+        env.ok(&["attest", "review", "--sign", "-m", "signed approval"]);
+        let v: serde_json::Value = serde_json::from_str(&env.ok(&["verify", "--provenance", "--json"])).unwrap();
+        assert_eq!(v["bad"], 0);
+        assert!(v["attestations"].as_array().unwrap().iter().any(|a| a["status"] == "signature good"), "{v}");
+    }
+
+    env.ok(&["push", "-u"]);
+    env.ok(&["push", "origin", "refs/notes/veyra/attestations"]);
+    assert!(
+        git_in(&env, &bare, &["notes", "--ref", "veyra/attestations", "list"])
+            .contains(&env.git(&["rev-parse", "HEAD"]).trim().to_string())
+    );
+}
