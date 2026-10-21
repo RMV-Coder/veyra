@@ -3,9 +3,10 @@
 **Version control that understands your code.** Git-compatible, written in Rust.
 
 > **Beta.** Veyra is feature-complete for everyday use and tested against real Git, but so far it
-> has only been used by its author, on Windows. Linux and macOS are not tested yet (see
-> [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)). Because it never changes Git's on-disk format,
-> you can always continue with plain `git` if something goes wrong — and please report it.
+> has only been used day to day by its author, on Windows. The test suite passes on Linux, macOS and
+> Windows in CI (see [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)). Because it never changes
+> Git's on-disk format, you can always continue with plain `git` if something goes wrong — and
+> please report it.
 
 Veyra is a version control system that reads and writes **standard Git repositories**. You can
 use it alongside `git` in either order, push to GitHub or GitLab as usual, and stop using it at

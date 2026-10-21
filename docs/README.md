@@ -5,9 +5,9 @@ system written in Rust. It reads and writes standard Git repositories, so you ca
 alongside `git` in either order, push to GitHub or GitLab as usual, and stop using it at any time.
 
 > **Beta.** Veyra is feature-complete for everyday use and tested against real Git, but so far it
-> has only been used by its author, on Windows. Linux and macOS are not tested yet (see
-> [Compatibility](COMPATIBILITY.md)). Because it never changes Git's on-disk format, you can always
-> continue with plain `git` if something goes wrong.
+> has only been used day to day by its author, on Windows. The test suite passes on Linux, macOS
+> and Windows in CI (see [Compatibility](COMPATIBILITY.md)). Because it never changes Git's on-disk
+> format, you can always continue with plain `git` if something goes wrong.
 
 ## What it adds to Git
 

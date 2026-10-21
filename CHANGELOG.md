@@ -3,6 +3,21 @@
 All notable changes are listed here. Veyra follows [semantic versioning](https://semver.org/);
 see [docs/STABILITY.md](docs/STABILITY.md) for what 1.x keeps stable.
 
+## 1.3.1
+
+The first release with downloadable binaries, and the first whose test suite has passed on Linux
+and macOS as well as Windows (CI runs on all three on every push). Veyra itself is unchanged
+from 1.3.0; the first CI runs only found problems in the tests and the release workflow.
+
+- **Fixed (tests):** the interactive-rebase tests used GNU `sed -i` as their todo editor, which
+  macOS's BSD `sed` doesn't accept; they use small awk scripts now.
+- **Fixed (tests):** the `format-patch` / `am` test applied patches in directory-listing order,
+  which is arbitrary on Linux.
+- **Fixed (release):** the Intel macOS build used GitHub's retired `macos-13` runner, so the release
+  could never finish; it runs on `macos-15-intel`.
+- COMPATIBILITY.md lists Linux and macOS as tested by CI; the beta note stays until Veyra has seen
+  daily use there.
+
 ## 1.3.0
 
 Veyra is labelled **beta**: it is tested against real Git on Windows, but Linux and macOS have no

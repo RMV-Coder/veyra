@@ -44,7 +44,7 @@ Known gaps carried forward: push, stash, rebase, cherry-pick, revert, hooks, com
 - [x] `add -p` (per-hunk y/n/q/a/d/s) and `exec`/`break` in `rebase -i`
 - [x] `branch cleanup [--dry-run]`, `branch compare`, `sync [--push]`
 - [x] `branch graph`, `branch explain` (with an in-memory merge preview)
-- [ ] CI on Linux, macOS and Windows (the workflow exists but is blocked on account billing), and a
+- [x] CI on Linux, macOS and Windows (first green run in 1.3, once the repository went public), and a
       published compatibility matrix
 
 **Exit criterion:** a developer can use Veyra full-time on a GitHub project without falling back
@@ -132,4 +132,4 @@ proposals are validated deterministically, and nothing changes history without e
 
 - Reftable, once gitoxide reads it (until then Veyra refuses reftable repositories with the
   `git refs migrate` fix)
-- CI results on Linux and macOS, then dropping the beta label
+- Dropping the beta label once Veyra has seen daily use on Linux and macOS

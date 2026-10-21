@@ -19,13 +19,14 @@ and what is not supported yet.
 
 | Platform | Status |
 |---|---|
-| Windows 10/11 (x86_64, MSVC) | Tested: the full suite runs on every change during development |
-| Linux (x86_64, aarch64, glibc) | **Not yet tested.** CI is configured for it but has not completed a run yet |
-| macOS (Apple silicon, Intel) | **Not yet tested.** CI is configured for it but has not completed a run yet |
+| Windows 10/11 (x86_64, MSVC) | Tested: CI on every push, and the author's daily use |
+| Linux (x86_64, glibc) | Tested: CI on every push (Ubuntu) |
+| macOS (Apple silicon) | Tested: CI on every push |
+| Linux (aarch64), macOS (Intel) | Tested when a release is built: the release workflow runs the suite before building |
 
-The CI workflow (`.github/workflows/ci.yml`) runs the same suite on all three platforms, but no run
-has finished so far, so treat Linux and macOS as untested until it does. Reports from either are
-very welcome.
+The CI workflow (`.github/workflows/ci.yml`) runs the whole suite, including the end-to-end tests
+that use the runner's Git as the oracle. So far only Windows has seen daily use, so reports from
+Linux and macOS users are very welcome.
 
 Minimum supported Rust version for building from source: **1.88**.
 
