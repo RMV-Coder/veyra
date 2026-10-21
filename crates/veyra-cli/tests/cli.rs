@@ -2126,3 +2126,186 @@ fn serve_is_local_token_protected_read_only_and_serves_the_data() {
     // Nothing the viewer did changed the repository.
     env.assert_git_clean_and_valid();
 }
+
+/// Git with a non-interactive editor (for `git rebase --continue`, `git commit --no-edit`, …).
+fn git_quiet(env: &Env, args: &[&str]) -> std::process::Output {
+    let mut cmd = Command::new("git");
+    env.apply(&mut cmd);
+    cmd.env("GIT_EDITOR", "true").env("GIT_SEQUENCE_EDITOR", "true").current_dir(&env.repo).args(args).output().unwrap()
+}
+
+/// topic: two commits on top of base, the first conflicting with main's change to a.txt.
+fn diverged_topic(env: &Env) -> String {
+    env.commit_file("a.txt", "base\n", "base");
+    env.ok(&["switch", "-c", "topic"]);
+    env.commit_file("a.txt", "topic\n", "topic change");
+    env.commit_file("b.txt", "b\n", "add b");
+    let topic = env.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    env.ok(&["switch", "main"]);
+    env.commit_file("a.txt", "main\n", "main change");
+    env.ok(&["switch", "topic"]);
+    topic
+}
+
+#[test]
+fn a_rebase_started_by_veyra_is_continued_or_aborted_by_git() {
+    require_git!();
+    let env = Env::new();
+    let topic = diverged_topic(&env);
+
+    env.veyra(&["rebase", "main"]).assert().failure().stdout(predicate::str::contains("CONFLICT"));
+    assert!(env.repo.join(".git/rebase-merge/head-name").exists(), "Git's own state directory");
+    assert!(env.git(&["status"]).contains("rebas"), "git status knows a rebase is in progress");
+
+    // Git aborts it…
+    let out = git_quiet(&env, &["rebase", "--abort"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(env.git(&["rev-parse", "HEAD"]).trim(), topic);
+    assert_eq!(env.git(&["rev-parse", "--abbrev-ref", "HEAD"]).trim(), "topic");
+
+    // …or continues it after the conflict is resolved.
+    env.veyra(&["rebase", "main"]).assert().failure();
+    env.write("a.txt", "main and topic\n");
+    env.git(&["add", "a.txt"]);
+    let out = git_quiet(&env, &["rebase", "--continue"]);
+    assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(env.git(&["log", "--format=%s", "-3"]), "add b\ntopic change\nmain change\n");
+    assert_eq!(env.git(&["log", "-1", "--format=%an", "HEAD~1"]).trim(), "Test User");
+    assert_eq!(env.git(&["rev-parse", "--abbrev-ref", "HEAD"]).trim(), "topic");
+    assert!(!env.repo.join(".git/rebase-merge").exists());
+    env.assert_git_clean_and_valid();
+    assert!(!env.ok(&["status"]).contains("rebasing"));
+}
+
+#[test]
+fn a_rebase_started_by_git_is_continued_or_aborted_by_veyra() {
+    require_git!();
+    let env = Env::new();
+    let topic = diverged_topic(&env);
+
+    let out = git_quiet(&env, &["rebase", "main"]);
+    assert!(!out.status.success(), "expected a conflict");
+    assert!(env.ok(&["status"]).contains("rebasing onto"), "veyra status sees Git's rebase");
+
+    env.ok(&["rebase", "--abort"]);
+    assert_eq!(env.git(&["rev-parse", "HEAD"]).trim(), topic);
+    assert!(!env.repo.join(".git/rebase-merge").exists());
+
+    assert!(!git_quiet(&env, &["rebase", "main"]).status.success());
+    env.write("a.txt", "main and topic\n");
+    env.ok(&["add", "a.txt"]);
+    let out = env.ok(&["rebase", "--continue"]);
+    assert!(out.contains("Successfully rebased"), "{out}");
+    assert_eq!(
+        env.git(&["log", "--format=%s|%an", "-3"]),
+        "add b|Test User\ntopic change|Test User\nmain change|Test User\n"
+    );
+    assert_eq!(env.git(&["rev-parse", "--abbrev-ref", "HEAD"]).trim(), "topic");
+    env.assert_git_clean_and_valid();
+
+    // An interactive Git rebase stopped at `edit` continues in Veyra too.
+    let mut cmd = Command::new("git");
+    env.apply(&mut cmd);
+    let out = cmd
+        .env("GIT_SEQUENCE_EDITOR", "sed -i -e '1s/^pick/edit/'")
+        .current_dir(&env.repo)
+        .args(["rebase", "-i", "HEAD~2"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    env.write("c.txt", "c\n");
+    env.ok(&["add", "c.txt"]);
+    env.ok(&["rebase", "--continue"]);
+    assert_eq!(
+        env.git(&["show", "--name-only", "--format=%s", "HEAD~1"])
+            .lines()
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>(),
+        vec!["topic change", "a.txt", "c.txt"]
+    );
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn bisect_sessions_are_shared_with_git() {
+    require_git!();
+    let env = Env::new();
+    for i in 0..10 {
+        let content = if i >= 6 { format!("broken {i}\n") } else { format!("fine {i}\n") };
+        env.commit_file("state.txt", &content, &format!("c{i}"));
+    }
+    let first_bad = env.git(&["rev-parse", "HEAD~3"]).trim().to_owned();
+    // Veyra starts; Git sees the session and finishes it.
+    env.ok(&["bisect", "start", "HEAD", "HEAD~9"]);
+    assert!(env.git(&["bisect", "log"]).contains("git bisect bad"));
+    for _ in 0..6 {
+        let content = env.read("state.txt").unwrap();
+        let verdict = if content.starts_with("fine") { "good" } else { "bad" };
+        let out = git_quiet(&env, &["bisect", verdict]);
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        if text.contains("is the first bad commit") {
+            assert!(text.contains(&first_bad), "{text}");
+            break;
+        }
+    }
+    git_quiet(&env, &["bisect", "reset"]);
+    assert_eq!(env.git(&["rev-parse", "--abbrev-ref", "HEAD"]).trim(), "main");
+
+    // Git starts; Veyra finishes and resets.
+    assert!(git_quiet(&env, &["bisect", "start", "HEAD", "HEAD~9"]).status.success());
+    let out = env.ok(&["bisect", "run", "grep", "-q", "fine", "state.txt"]);
+    assert!(out.contains("is the first bad commit") && out.contains(&first_bad), "{out}");
+    env.ok(&["bisect", "reset"]);
+    assert_eq!(env.git(&["rev-parse", "--abbrev-ref", "HEAD"]).trim(), "main");
+    assert!(env.git(&["for-each-ref", "refs/bisect"]).is_empty());
+    assert!(!env.repo.join(".git/BISECT_START").exists());
+}
+
+/// main and topic both change a.txt; topic also adds b.txt in a second commit.
+fn pick_fixture(env: &Env) {
+    env.commit_file("a.txt", "base\n", "base");
+    env.ok(&["switch", "-c", "topic"]);
+    env.commit_file("a.txt", "t1\n", "t1");
+    env.commit_file("b.txt", "t2\n", "t2");
+    env.ok(&["switch", "main"]);
+    env.commit_file("a.txt", "m\n", "m");
+}
+
+#[test]
+fn multi_commit_cherry_picks_are_shared_with_git() {
+    require_git!();
+    let env = Env::new();
+    pick_fixture(&env);
+    let main = env.git(&["rev-parse", "HEAD"]).trim().to_owned();
+
+    // Veyra stops on the first commit; the second is remembered in Git's sequencer.
+    let out = env.veyra(&["cherry-pick", "topic~1", "topic"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("1 commit still to apply"));
+    assert!(env.repo.join(".git/sequencer/todo").exists());
+    env.write("a.txt", "resolved\n");
+    env.git(&["add", "a.txt"]);
+    let out = git_quiet(&env, &["cherry-pick", "--continue"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(env.git(&["log", "--format=%s", "-3"]), "t2\nt1\nm\n", "git applied the rest");
+
+    // Git stops; Veyra continues with the rest.
+    git_quiet(&env, &["reset", "--hard", &main]);
+    assert!(!git_quiet(&env, &["cherry-pick", "topic~1", "topic"]).status.success());
+    env.write("a.txt", "resolved\n");
+    env.ok(&["add", "a.txt"]);
+    env.ok(&["cherry-pick", "--continue"]);
+    assert_eq!(env.git(&["log", "--format=%s", "-3"]), "t2\nt1\nm\n");
+    assert!(!env.repo.join(".git/sequencer").exists());
+    env.assert_git_clean_and_valid();
+
+    // --skip drops the stopped commit and applies the rest; --abort rewinds the whole sequence.
+    git_quiet(&env, &["reset", "--hard", &main]);
+    env.veyra(&["cherry-pick", "topic~1", "topic"]).assert().failure();
+    env.ok(&["cherry-pick", "--skip"]);
+    assert_eq!(env.git(&["log", "--format=%s", "-2"]), "t2\nm\n");
+    git_quiet(&env, &["reset", "--hard", &main]);
+    assert!(!git_quiet(&env, &["cherry-pick", "topic~1", "topic"]).status.success());
+    env.ok(&["cherry-pick", "--abort"]);
+    assert_eq!(env.git(&["rev-parse", "HEAD"]).trim(), main);
+    env.assert_git_clean_and_valid();
+}

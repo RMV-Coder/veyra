@@ -148,7 +148,9 @@ impl Repo {
 // ------------------------------------------------------------------------------------------
 // bisect
 
-/// An in-progress bisection (`.git/veyra/bisect.json`).
+/// An in-progress bisection, stored in Git's own layout (`BISECT_START`, `BISECT_TERMS`,
+/// `BISECT_LOG`, `refs/bisect/bad`, `refs/bisect/good-*`, `refs/bisect/skip-*`), so `git bisect`
+/// and `veyra bisect` can take turns in the same session.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BisectState {
     pub bad: Option<String>,
@@ -158,6 +160,9 @@ pub struct BisectState {
     pub original: String,
     #[serde(default)]
     pub log: Vec<String>,
+    /// The terms in use (`bad`/`good` unless the session was started with custom terms).
+    #[serde(default)]
+    pub terms: Option<(String, String)>,
 }
 
 /// What the next bisection step is.
@@ -174,21 +179,95 @@ pub enum BisectStep {
 }
 
 impl Repo {
-    fn bisect_path(&self) -> std::path::PathBuf {
+    fn legacy_bisect_path(&self) -> std::path::PathBuf {
         self.veyra_dir().join("bisect.json")
     }
 
-    pub fn bisect_state(&self) -> Result<Option<BisectState>> {
-        match std::fs::read_to_string(self.bisect_path()) {
-            Ok(text) => Ok(Some(serde_json::from_str(&text).context("corrupt bisect state")?)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
+    fn bisect_file(&self, name: &str) -> std::path::PathBuf {
+        self.git_dir().join(name)
+    }
+
+    /// The bad and good terms of the session (`bad`/`good`, or e.g. `new`/`old`).
+    fn bisect_terms(&self) -> (String, String) {
+        let text = std::fs::read_to_string(self.bisect_file("BISECT_TERMS")).unwrap_or_default();
+        let mut lines = text.lines();
+        match (lines.next(), lines.next()) {
+            (Some(b), Some(g)) if !b.is_empty() && !g.is_empty() => (b.to_owned(), g.to_owned()),
+            _ => ("bad".into(), "good".into()),
         }
     }
 
-    fn save_bisect(&self, state: &BisectState) -> Result<()> {
-        std::fs::create_dir_all(self.veyra_dir())?;
-        std::fs::write(self.bisect_path(), serde_json::to_string_pretty(state)?)?;
+    pub fn bisect_state(&self) -> Result<Option<BisectState>> {
+        let Ok(start) = std::fs::read_to_string(self.bisect_file("BISECT_START")) else {
+            // A session started by Veyra < 1.3.
+            return match std::fs::read_to_string(self.legacy_bisect_path()) {
+                Ok(text) => Ok(Some(serde_json::from_str(&text).context("corrupt bisect state")?)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e.into()),
+            };
+        };
+        let start = start.trim();
+        // Git stores the branch's short name, or a commit id when HEAD was detached.
+        let original = if start.len() >= 40 && start.bytes().all(|b| b.is_ascii_hexdigit()) {
+            start.to_owned()
+        } else {
+            format!("refs/heads/{start}")
+        };
+        let (bad_term, good_term) = self.bisect_terms();
+        let mut state = BisectState { original, ..Default::default() };
+        for (name, id) in self.all_refs()? {
+            let Some(rest) = name.strip_prefix("refs/bisect/") else { continue };
+            if rest == bad_term {
+                state.bad = Some(id.to_string());
+            } else if rest.starts_with(&format!("{good_term}-")) {
+                state.good.push(id.to_string());
+            } else if rest.starts_with("skip-") {
+                state.skip.push(id.to_string());
+            }
+        }
+        state.log = std::fs::read_to_string(self.bisect_file("BISECT_LOG"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.starts_with("git bisect "))
+            .map(|l| l.trim_start_matches("git bisect ").to_owned())
+            .collect();
+        if (bad_term.as_str(), good_term.as_str()) != ("bad", "good") {
+            state.terms = Some((bad_term, good_term));
+        }
+        Ok(Some(state))
+    }
+
+    fn bisect_log(&self, lines: &[String]) -> Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(self.bisect_file("BISECT_LOG"))?;
+        for l in lines {
+            writeln!(f, "{l}")?;
+        }
+        Ok(())
+    }
+
+    /// Move a session started by Veyra < 1.3 into Git's layout.
+    fn migrate_legacy_bisect(&self, state: &BisectState) -> Result<()> {
+        let start = if state.original.starts_with("refs/") {
+            crate::refs::shorten(&state.original).to_owned()
+        } else {
+            state.original.clone()
+        };
+        std::fs::write(self.bisect_file("BISECT_START"), format!("{start}\n"))?;
+        std::fs::write(self.bisect_file("BISECT_TERMS"), "bad\ngood\n")?;
+        std::fs::write(self.bisect_file("BISECT_NAMES"), "\n")?;
+        std::fs::write(self.bisect_file("BISECT_LOG"), "git bisect start\n")?;
+        let id = |h: &String| ObjectId::from_hex(h.as_bytes());
+        if let Some(b) = &state.bad {
+            self.set_ref("refs/bisect/bad", id(b)?, None, "bisect bad")?;
+        }
+        for g in &state.good {
+            self.set_ref(&format!("refs/bisect/good-{g}"), id(g)?, None, "bisect good")?;
+        }
+        for k in &state.skip {
+            self.set_ref(&format!("refs/bisect/skip-{k}"), id(k)?, None, "bisect skip")?;
+        }
+        let _ = std::fs::remove_file(self.legacy_bisect_path());
         Ok(())
     }
 
@@ -197,28 +276,60 @@ impl Repo {
         if self.bisect_state()?.is_some() {
             bail!("a bisection is already in progress\n  hint: `veyra bisect reset` ends it");
         }
-        let original = match self.head_state()? {
-            crate::HeadState::Branch { name, .. } => name.to_string(),
-            crate::HeadState::Detached(id) => id.to_string(),
+        let (original, start) = match self.head_state()? {
+            crate::HeadState::Branch { name, .. } => {
+                let full = name.to_string();
+                let short = crate::refs::shorten(&full).to_owned();
+                (full, short)
+            }
+            crate::HeadState::Detached(id) => (id.to_string(), id.to_string()),
         };
-        let state = BisectState { original, ..Default::default() };
-        self.save_bisect(&state)?;
-        Ok(state)
+        std::fs::write(self.bisect_file("BISECT_START"), format!("{start}\n"))?;
+        std::fs::write(self.bisect_file("BISECT_TERMS"), "bad\ngood\n")?;
+        std::fs::write(self.bisect_file("BISECT_NAMES"), "\n")?;
+        std::fs::write(self.bisect_file("BISECT_LOG"), "git bisect start\n")?;
+        Ok(BisectState { original, log: vec!["start".into()], ..Default::default() })
     }
 
     /// Mark `commit` as `good`, `bad` or `skip`, then check out the next commit to test.
     pub fn bisect_mark(&self, mark: &str, commit: ObjectId) -> Result<BisectStep> {
         let mut state = self.bisect_state()?.context("no bisection in progress\n  hint: veyra bisect start")?;
-        let hex = commit.to_string();
-        match mark {
-            "bad" => state.bad = Some(hex.clone()),
-            "good" => state.good.push(hex.clone()),
-            "skip" => state.skip.push(hex.clone()),
-            other => bail!("unknown bisect mark '{other}'"),
+        if !self.bisect_file("BISECT_START").exists() {
+            self.migrate_legacy_bisect(&state)?;
         }
-        state.log.push(format!("{mark} {hex}"));
-        self.save_bisect(&state)?;
-        self.bisect_next(&state)
+        let hex = commit.to_string();
+        let (bad_term, good_term) = self.bisect_terms();
+        let (term, reference) = match mark {
+            "bad" => {
+                state.bad = Some(hex.clone());
+                (bad_term.clone(), format!("refs/bisect/{bad_term}"))
+            }
+            "good" => {
+                state.good.push(hex.clone());
+                (good_term.clone(), format!("refs/bisect/{good_term}-{hex}"))
+            }
+            "skip" => {
+                state.skip.push(hex.clone());
+                ("skip".to_owned(), format!("refs/bisect/skip-{hex}"))
+            }
+            other => bail!("unknown bisect mark '{other}'"),
+        };
+        self.set_ref(&reference, commit, None, &format!("bisect {term}"))?;
+        let subject = self.commit_info(commit).map(|c| c.summary().to_owned()).unwrap_or_default();
+        self.bisect_log(&[format!("# {term}: [{hex}] {subject}"), format!("git bisect {term} {hex}")])?;
+        state.log.push(format!("{term} {hex}"));
+        let step = self.bisect_next(&state)?;
+        match &step {
+            BisectStep::Test { commit, .. } => {
+                std::fs::write(self.bisect_file("BISECT_EXPECTED_REV"), format!("{commit}\n"))?;
+            }
+            BisectStep::Found(c) => {
+                let subject = self.commit_info(*c).map(|i| i.summary().to_owned()).unwrap_or_default();
+                self.bisect_log(&[format!("# first {bad_term} commit: [{c}] {subject}")])?;
+            }
+            _ => {}
+        }
+        Ok(step)
     }
 
     fn bisect_next(&self, state: &BisectState) -> Result<BisectStep> {
@@ -272,7 +383,23 @@ impl Repo {
         } else {
             self.switch(SwitchTarget::Detach(ObjectId::from_hex(state.original.as_bytes())?), false)?;
         }
-        std::fs::remove_file(self.bisect_path())?;
+        for (name, _) in self.all_refs()? {
+            if name.starts_with("refs/bisect/") {
+                self.delete_ref(&name, None)?;
+            }
+        }
+        for f in [
+            "BISECT_START",
+            "BISECT_TERMS",
+            "BISECT_NAMES",
+            "BISECT_LOG",
+            "BISECT_EXPECTED_REV",
+            "BISECT_ANCESTORS_OK",
+            "BISECT_HEAD",
+        ] {
+            let _ = std::fs::remove_file(self.bisect_file(f));
+        }
+        let _ = std::fs::remove_file(self.legacy_bisect_path());
         Ok(crate::refs::shorten(&state.original).to_owned())
     }
 }

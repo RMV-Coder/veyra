@@ -17,6 +17,7 @@ fn verb(kind: PickKind) -> &'static str {
 pub fn pick(ctx: &Ctx, kind: PickKind, args: SequenceArgs) -> Result<()> {
     let repo = ctx.repo()?;
     let name = verb(kind);
+    let options = PickOptions { no_commit: args.no_commit, record_origin: args.record_origin, mainline: args.mainline };
     if args.abort {
         journal(ctx, &repo, &format!("{name}-abort"), true, || {
             repo.abort_pick()?;
@@ -25,24 +26,62 @@ pub fn pick(ctx: &Ctx, kind: PickKind, args: SequenceArgs) -> Result<()> {
         anstream::println!("{name} aborted.");
         return Ok(());
     }
-    if args.continue_ {
-        let id = journal(ctx, &repo, name, false, || {
-            let id = repo.continue_pick(None)?;
-            Ok((id, format!("{name} --continue: {}", veyra_core::short(&id))))
-        })?;
-        let info = repo.commit_info(id)?;
-        anstream::println!("[{} {}] {}", repo.head_label()?, veyra_core::short(&id), info.summary());
-        super::report_auto_resolutions(&repo);
-        return Ok(());
+    if args.continue_ || args.skip {
+        // A multi-commit sequence (started by Veyra or Git) keeps the rest in .git/sequencer.
+        let mut rest = repo.sequencer_todo()?;
+        let start = repo.sequence_start();
+        if args.skip {
+            journal(ctx, &repo, &format!("{name}-skip"), true, || {
+                let head = repo.head_commit_id()?.context("HEAD is unborn")?;
+                repo.reset(head, veyra_core::checkout::ResetMode::Hard)?;
+                repo.clear_pick_state()?;
+                Ok(((), format!("{name} --skip")))
+            })?;
+            anstream::println!("Skipped the stopped commit.");
+        } else if repo.pick_in_progress()?.is_some() {
+            let id = journal(ctx, &repo, name, false, || {
+                let id = repo.continue_pick(None)?;
+                Ok((id, format!("{name} --continue: {}", veyra_core::short(&id))))
+            })?;
+            let info = repo.commit_info(id)?;
+            anstream::println!("[{} {}] {}", repo.head_label()?, veyra_core::short(&id), info.summary());
+            super::report_auto_resolutions(&repo);
+        } else if rest.is_empty() {
+            bail!("no {name} in progress");
+        }
+        if !rest.is_empty() {
+            rest.remove(0); // the commit that stopped (now committed or skipped)
+        }
+        repo.clear_sequencer()?;
+        if rest.is_empty() {
+            return Ok(());
+        }
+        let start = start.or(repo.head_commit_id()?).context("HEAD is unborn")?;
+        let items: Vec<_> = rest.into_iter().map(|(k, c)| (k, c, veyra_core::short(&c))).collect();
+        return run_sequence(ctx, &repo, items, &options, start);
     }
     if args.commits.is_empty() {
-        bail!("usage: veyra {name} <commit>... | --continue | --abort");
+        bail!("usage: veyra {name} <commit>... | --continue | --skip | --abort");
     }
     let commits: Vec<_> = args.commits.iter().map(|c| repo.rev_parse_commit(c)).collect::<Result<_>>()?;
-    let options = PickOptions { no_commit: args.no_commit, record_origin: args.record_origin, mainline: args.mainline };
-    for (spec, commit) in args.commits.iter().zip(commits) {
-        let outcome = journal(ctx, &repo, name, true, || {
-            let o = repo.pick(kind, commit, &options)?;
+    let start = repo.head_commit_id()?.context("cannot replay onto an unborn branch")?;
+    let items = args.commits.iter().zip(commits).map(|(spec, c)| (kind, c, spec.clone())).collect();
+    run_sequence(ctx, &repo, items, &options, start)
+}
+
+/// Apply commits in order. On a conflict, the rest is saved in Git's sequencer format so either
+/// `veyra` or `git` can `--continue`, `--skip` or `--abort`.
+fn run_sequence(
+    ctx: &Ctx,
+    repo: &veyra_core::Repo,
+    items: Vec<(PickKind, veyra_core::ObjectId, String)>,
+    options: &PickOptions,
+    start: veyra_core::ObjectId,
+) -> Result<()> {
+    for (i, (kind, commit, spec)) in items.iter().enumerate() {
+        let name = verb(*kind);
+        let outcome = journal(ctx, repo, name, true, || {
+            let o = repo.pick(*kind, *commit, options)?;
             let summary = match &o {
                 PickOutcome::Committed(id) => format!("{name} {spec} → {}", veyra_core::short(id)),
                 PickOutcome::Empty => format!("{name} {spec}: nothing to do"),
@@ -51,7 +90,7 @@ pub fn pick(ctx: &Ctx, kind: PickKind, args: SequenceArgs) -> Result<()> {
             };
             Ok((o, summary))
         })?;
-        super::report_auto_resolutions(&repo);
+        super::report_auto_resolutions(repo);
         match outcome {
             PickOutcome::Committed(id) => {
                 let info = repo.commit_info(id)?;
@@ -60,15 +99,22 @@ pub fn pick(ctx: &Ctx, kind: PickKind, args: SequenceArgs) -> Result<()> {
             PickOutcome::Empty => anstream::println!("{spec}: the change is already present; nothing to commit"),
             PickOutcome::Applied => anstream::println!("Applied {spec} to the index and working tree (not committed)"),
             PickOutcome::Conflicts(paths) => {
+                if items.len() > 1 {
+                    let todo: Vec<_> = items[i..].iter().map(|(k, c, _)| (*k, *c)).collect();
+                    repo.save_sequencer(start, &todo)?;
+                }
                 for p in &paths {
                     anstream::println!("CONFLICT (content): merge conflict in {p}");
                 }
                 if paths.is_empty() {
                     anstream::println!("Every conflict was resolved structurally and staged for review.");
                 }
+                let left = items.len() - i - 1;
+                let rest =
+                    if left > 0 { format!(" ({} still to apply)", plural(left, "commit")) } else { String::new() };
                 anstream::println!(
-                    "{name} of {spec} stopped. Fix the conflicts, `veyra add` them, then `veyra {name} --continue` \
-                     (or `veyra {name} --abort`)."
+                    "{name} of {spec} stopped{rest}. Fix the conflicts, `veyra add` them, then `veyra {name} --continue` \
+                     (or `--skip` / `--abort`)."
                 );
                 return Err(Reported.into());
             }

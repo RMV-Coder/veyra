@@ -1253,6 +1253,9 @@ pub struct SequenceArgs {
     /// Give up and return to the state before.
     #[arg(long, group = "seq")]
     pub abort: bool,
+    /// Leave the stopped commit out and go on with the rest.
+    #[arg(long, group = "seq")]
+    pub skip: bool,
 }
 
 #[derive(Args, Debug)]

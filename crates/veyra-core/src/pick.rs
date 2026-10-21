@@ -122,45 +122,33 @@ impl RebaseStep {
     pub fn new(action: RebaseAction, commit: ObjectId) -> Self {
         RebaseStep { action, commit, command: None }
     }
-
-    fn to_line(&self) -> String {
-        match self.action {
-            RebaseAction::Exec => format!("exec {}", self.command.as_deref().unwrap_or_default()),
-            RebaseAction::Break => "break".into(),
-            a => format!("{} {}", a.name(), self.commit),
-        }
-    }
 }
 
-/// Persisted state of a rebase that stopped (conflict or `edit`).
+/// The state of a rebase in progress, stored in Git's own layout (`.git/rebase-merge/`, the
+/// "merge" backend that `git rebase` uses), so `git rebase --continue / --skip / --abort` work on
+/// a rebase Veyra started and `veyra rebase --continue` works on one Git started.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebaseState {
     /// The branch being rebased (`refs/heads/x`), or `None` for a detached HEAD.
     pub branch: Option<String>,
     pub orig_head: ObjectId,
     pub onto: ObjectId,
-    /// Steps still to apply, in order.
+    /// Steps still to apply, in order (`git-rebase-todo`).
     pub todo: Vec<RebaseStep>,
-    /// The step whose replay stopped with conflicts.
+    /// The step whose replay stopped with conflicts (`REBASE_HEAD`).
     pub current: Option<RebaseStep>,
+    /// Lines of the steps already processed (`done`).
+    pub done: Vec<String>,
+    /// Started as `rebase -i` (Git then says "interactive rebase in progress").
+    pub interactive: bool,
+    /// Stopped at an `edit` step: HEAD at the stop (`amend`).
+    pub amend: Option<ObjectId>,
 }
 
 impl RebaseState {
-    fn to_text(&self) -> String {
-        let mut s = String::new();
-        s.push_str(&format!("branch {}\n", self.branch.as_deref().unwrap_or("-")));
-        s.push_str(&format!("orig-head {}\n", self.orig_head));
-        s.push_str(&format!("onto {}\n", self.onto));
-        if let Some(c) = &self.current {
-            s.push_str(&format!("current {}\n", c.to_line()));
-        }
-        for t in &self.todo {
-            s.push_str(&format!("{}\n", t.to_line()));
-        }
-        s
-    }
-
-    fn from_text(text: &str) -> Result<RebaseState> {
+    /// The format of `.git/veyra/rebase-state`, written by Veyra before 1.3; still read so a
+    /// rebase stopped by an older version can be continued.
+    fn from_legacy_text(text: &str) -> Result<RebaseState> {
         let parse =
             |hex: &str| ObjectId::from_hex(hex.trim().as_bytes()).map_err(|e| anyhow!("corrupt rebase state: {e}"));
         let null = ObjectId::null(gix::hash::Kind::Sha1);
@@ -207,8 +195,80 @@ impl RebaseState {
             onto: onto.context("corrupt rebase state: no onto")?,
             todo,
             current,
+            done: Vec::new(),
+            interactive: false,
+            amend: None,
         })
     }
+}
+
+/// Quote a value for Git's `author-script` (a shell fragment): `'it'\''s'`.
+fn sq_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Read one `KEY='value'` line of an `author-script`.
+fn sq_unquote(value: &str) -> String {
+    let mut out = String::new();
+    let mut quoted = false;
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, quoted) {
+            ('\'', _) => quoted = !quoted,
+            ('\\', false) => {
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+            }
+            (c, _) => out.push(c),
+        }
+    }
+    out
+}
+
+/// Git's `author-script` for a signature.
+fn author_script(author: &gix::actor::SignatureRef<'_>) -> String {
+    let time = author.time().unwrap_or_default();
+    let sign = if time.offset < 0 { '-' } else { '+' };
+    let off = time.offset.unsigned_abs();
+    format!(
+        "GIT_AUTHOR_NAME={}\nGIT_AUTHOR_EMAIL={}\nGIT_AUTHOR_DATE={}\n",
+        sq_quote(&author.name.to_str_lossy()),
+        sq_quote(&author.email.to_str_lossy()),
+        sq_quote(&format!("@{} {sign}{:02}{:02}", time.seconds, off / 3600, (off % 3600) / 60)),
+    )
+}
+
+/// Parse an `author-script` back into a signature.
+fn parse_author_script(text: &str) -> Option<gix::actor::Signature> {
+    let mut name = None;
+    let mut email = None;
+    let mut date = None;
+    for line in text.lines() {
+        let (k, v) = line.split_once('=')?;
+        let v = sq_unquote(v);
+        match k {
+            "GIT_AUTHOR_NAME" => name = Some(v),
+            "GIT_AUTHOR_EMAIL" => email = Some(v),
+            "GIT_AUTHOR_DATE" => date = Some(v),
+            _ => {}
+        }
+    }
+    let date = date?;
+    let (secs, offset) = date.trim_start_matches('@').split_once(' ')?;
+    let seconds: i64 = secs.parse().ok()?;
+    let (sign, digits) = offset.split_at(1);
+    let hours: i32 = digits.get(..2)?.parse().ok()?;
+    let minutes: i32 = digits.get(2..4)?.parse().ok()?;
+    let mut off = hours * 3600 + minutes * 60;
+    if sign == "-" {
+        off = -off;
+    }
+    Some(gix::actor::Signature {
+        name: name?.as_str().into(),
+        email: email?.as_str().into(),
+        time: gix::date::Time { seconds, offset: off },
+    })
 }
 
 /// What a rebase did.
@@ -459,30 +519,174 @@ impl Repo {
     // ---------------------------------------------------------------------------------------
     // rebase
 
-    fn rebase_state_path(&self) -> PathBuf {
+    fn legacy_rebase_state_path(&self) -> PathBuf {
         self.veyra_dir().join("rebase-state")
     }
 
-    pub fn rebase_in_progress(&self) -> Result<Option<RebaseState>> {
-        match std::fs::read_to_string(self.rebase_state_path()) {
-            Ok(text) => Ok(Some(RebaseState::from_text(&text)?)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
+    fn rebase_dir(&self) -> PathBuf {
+        self.git_dir().join("rebase-merge")
+    }
+
+    /// One todo/done line: `pick <id> <subject>`, as Git writes them.
+    fn step_line(&self, step: &RebaseStep) -> String {
+        match step.action {
+            RebaseAction::Exec => format!("exec {}", step.command.as_deref().unwrap_or_default()),
+            RebaseAction::Break => "break".into(),
+            a => {
+                let subject = self.commit_info(step.commit).map(|c| c.summary().to_owned()).unwrap_or_default();
+                format!("{} {} {subject}", a.name(), step.commit)
+            }
         }
     }
 
+    /// Parse a `git-rebase-todo` written by Git or Veyra. Steps Veyra can't run (from
+    /// `--rebase-merges` or `--update-refs`) are reported so the user can continue with Git.
+    pub fn parse_git_todo(&self, text: &str) -> Result<Vec<RebaseStep>> {
+        let null = ObjectId::null(self.object_hash());
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (verb, rest) = line.split_once(char::is_whitespace).map(|(v, r)| (v, r.trim())).unwrap_or((line, ""));
+            match verb {
+                "noop" => continue,
+                "exec" | "x" => {
+                    out.push(RebaseStep { action: RebaseAction::Exec, commit: null, command: Some(rest.to_owned()) });
+                    continue;
+                }
+                "break" | "b" => {
+                    out.push(RebaseStep::new(RebaseAction::Break, null));
+                    continue;
+                }
+                "label" | "l" | "reset" | "t" | "merge" | "m" | "update-ref" | "u" => bail!(
+                    "this rebase uses `{verb}` steps (from --rebase-merges or --update-refs), which Veyra can't run yet\n  \
+                     hint: continue it with `git rebase --continue`"
+                ),
+                _ => {}
+            }
+            let action = RebaseAction::parse(verb).with_context(|| format!("unknown rebase step `{line}`"))?;
+            let id =
+                rest.split_whitespace().next().with_context(|| format!("rebase step without a commit: `{line}`"))?;
+            if id.starts_with('-') {
+                bail!(
+                    "`{line}`: fixup -C / -c isn't supported by Veyra yet\n  hint: continue it with `git rebase --continue`"
+                );
+            }
+            out.push(RebaseStep::new(action, self.rev_parse_commit(id)?));
+        }
+        Ok(out)
+    }
+
+    pub fn rebase_in_progress(&self) -> Result<Option<RebaseState>> {
+        let dir = self.rebase_dir();
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).map(|s| s.trim_end().to_owned());
+        let Ok(head_name) = read("head-name") else {
+            // A rebase stopped by Veyra < 1.3.
+            return match std::fs::read_to_string(self.legacy_rebase_state_path()) {
+                Ok(text) => Ok(Some(RebaseState::from_legacy_text(&text)?)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e.into()),
+            };
+        };
+        let id = |name: &str| -> Result<ObjectId> {
+            let text = read(name).with_context(|| format!("incomplete rebase state: no {name}"))?;
+            self.rev_parse_commit(text.trim())
+        };
+        let branch = (head_name != "detached HEAD").then_some(head_name);
+        let todo = self.parse_git_todo(&read("git-rebase-todo").unwrap_or_default())?;
+        let done: Vec<String> = read("done").unwrap_or_default().lines().map(str::to_owned).collect();
+        let amend = read("amend").ok().and_then(|h| ObjectId::from_hex(h.trim().as_bytes()).ok());
+        // Stopped with conflicts: Git records the commit being applied in REBASE_HEAD. (It writes
+        // REBASE_HEAD at `edit` stops too, but those also have `amend`.)
+        let rebase_head =
+            if amend.is_some() { None } else { std::fs::read_to_string(self.git_dir().join("REBASE_HEAD")).ok() };
+        let current = match rebase_head.ok_or(()) {
+            Ok(hex) => {
+                let commit = self.rev_parse_commit(hex.trim())?;
+                let action = done
+                    .last()
+                    .and_then(|l| l.split_whitespace().next())
+                    .and_then(RebaseAction::parse)
+                    .unwrap_or(RebaseAction::Pick);
+                Some(RebaseStep::new(action, commit))
+            }
+            Err(_) => None,
+        };
+        Ok(Some(RebaseState {
+            branch,
+            orig_head: id("orig-head")?,
+            onto: id("onto")?,
+            todo,
+            current,
+            done,
+            interactive: dir.join("interactive").exists(),
+            amend,
+        }))
+    }
+
+    /// Write the state in Git's layout. `stop` describes the commit a conflict stopped on.
     fn save_rebase_state(&self, state: &RebaseState) -> Result<()> {
-        std::fs::create_dir_all(self.veyra_dir())?;
-        std::fs::write(self.rebase_state_path(), state.to_text())?;
+        let dir = self.rebase_dir();
+        std::fs::create_dir_all(&dir)?;
+        let write = |name: &str, content: String| std::fs::write(dir.join(name), content);
+        write("head-name", format!("{}\n", state.branch.as_deref().unwrap_or("detached HEAD")))?;
+        write("onto", format!("{}\n", state.onto))?;
+        write("orig-head", format!("{}\n", state.orig_head))?;
+        let todo: String = state.todo.iter().map(|s| format!("{}\n", self.step_line(s))).collect();
+        write("git-rebase-todo", todo)?;
+        let done: String = state.done.iter().map(|l| format!("{l}\n")).collect();
+        write("done", done)?;
+        write("msgnum", format!("{}\n", state.done.len()))?;
+        write("end", format!("{}\n", state.done.len() + state.todo.len()))?;
+        if state.interactive {
+            write("interactive", String::new())?;
+        }
+        match state.amend {
+            Some(id) => write("amend", format!("{id}\n"))?,
+            None => remove_if_exists(&dir.join("amend"))?,
+        }
+        remove_if_exists(&self.legacy_rebase_state_path())?;
         Ok(())
     }
 
-    pub fn clear_rebase_state(&self) -> Result<()> {
-        match std::fs::remove_file(self.rebase_state_path()) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
+    /// Record a conflict stop the way Git does: `REBASE_HEAD`, `stopped-sha`, the message and the
+    /// original author (so `git rebase --continue` commits the resolution correctly).
+    fn record_rebase_stop(&self, commit: ObjectId) -> Result<()> {
+        let dir = self.rebase_dir();
+        let c = self.git.find_commit(commit)?;
+        let info = self.commit_info(commit)?;
+        std::fs::write(self.git_dir().join("REBASE_HEAD"), format!("{commit}\n"))?;
+        std::fs::write(dir.join("stopped-sha"), format!("{commit}\n"))?;
+        std::fs::write(dir.join("message"), &info.message)?;
+        std::fs::write(dir.join("author-script"), author_script(&c.author()?))?;
+        // Git doesn't keep CHERRY_PICK_HEAD during a rebase; REBASE_HEAD takes its place.
+        remove_if_exists(&self.pick_state_path(PickKind::CherryPick))?;
+        Ok(())
+    }
+
+    fn clear_rebase_stop(&self) -> Result<()> {
+        let dir = self.rebase_dir();
+        for f in [
+            self.git_dir().join("REBASE_HEAD"),
+            dir.join("stopped-sha"),
+            dir.join("message"),
+            dir.join("author-script"),
+        ] {
+            remove_if_exists(&f)?;
         }
+        self.clear_pick_state()
+    }
+
+    pub fn clear_rebase_state(&self) -> Result<()> {
+        self.clear_rebase_stop()?;
+        match std::fs::remove_dir_all(self.rebase_dir()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        remove_if_exists(&self.legacy_rebase_state_path())
     }
 
     /// Commits on HEAD that are not on `upstream`, oldest first, excluding merges (like `git rebase`).
@@ -517,6 +721,9 @@ impl Repo {
         if self.rebase_in_progress()?.is_some() {
             bail!("a rebase is already in progress\n  hint: `veyra rebase --continue`, `--skip` or `--abort`");
         }
+        if self.git_dir().join("rebase-apply").exists() {
+            bail!("a `git am` or apply-backend rebase is in progress (.git/rebase-apply); finish it with git first");
+        }
         if self.merge_head()?.is_some() || self.pick_in_progress()?.is_some() {
             bail!("a merge, cherry-pick or revert is in progress; finish or abort it first");
         }
@@ -547,7 +754,17 @@ impl Repo {
         // Detach at `onto` and replay.
         self.checkout_tree(self.commit_tree_id(onto)?, false)?;
         self.set_head_detached(onto, &format!("rebase (start): checkout {}", crate::short(&onto)))?;
-        let state = RebaseState { branch, orig_head: head, onto, todo, current: None };
+        let state = RebaseState {
+            branch,
+            orig_head: head,
+            onto,
+            todo,
+            current: None,
+            done: Vec::new(),
+            interactive,
+            amend: None,
+        };
+        self.save_rebase_state(&state)?;
         self.run_rebase(state, 0, 0, editor)
     }
 
@@ -560,6 +777,7 @@ impl Repo {
     ) -> Result<RebaseOutcome> {
         while !state.todo.is_empty() {
             let step = state.todo.remove(0);
+            state.done.push(self.step_line(&step));
             match step.action {
                 RebaseAction::Drop => {
                     skipped += 1;
@@ -589,7 +807,9 @@ impl Repo {
                     picked += 1;
                     self.after_rebase_pick(&step, editor)?;
                     if step.action == RebaseAction::Edit {
+                        state.amend = self.head_commit_id()?;
                         self.save_rebase_state(&state)?;
+                        self.record_rebase_stop(step.commit)?;
                         return Ok(RebaseOutcome::Edit { commit: step.commit, remaining: state.todo.len() });
                     }
                 }
@@ -600,6 +820,7 @@ impl Repo {
                     state.current = Some(step);
                     let remaining = state.todo.len();
                     self.save_rebase_state(&state)?;
+                    self.record_rebase_stop(commit)?;
                     return Ok(RebaseOutcome::Stopped { commit, paths, remaining });
                 }
             }
@@ -686,12 +907,90 @@ impl Repo {
         Ok(())
     }
 
-    /// Abort a stopped cherry-pick or revert: back to HEAD, discarding the partial result.
+    /// Abort a stopped cherry-pick or revert: back to HEAD, discarding the partial result. For a
+    /// multi-commit sequence, back to where the whole sequence started (like `git cherry-pick --abort`).
     pub fn abort_pick(&self) -> Result<()> {
-        self.pick_in_progress()?.context("no cherry-pick or revert in progress")?;
+        let start = self.sequencer_start();
+        if self.pick_in_progress()?.is_none() && start.is_none() {
+            bail!("no cherry-pick or revert in progress");
+        }
         let head = self.head_commit_id()?.context("HEAD is unborn")?;
-        self.checkout_tree_forced_to(head)?;
+        let safe = std::fs::read_to_string(self.sequencer_dir().join("abort-safety"))
+            .ok()
+            .and_then(|h| ObjectId::from_hex(h.trim().as_bytes()).ok());
+        match start {
+            // Rewind only if HEAD is still where the sequence stopped, like Git.
+            Some(start) if safe.is_none_or(|s| s == head) => {
+                self.checkout_tree_forced_to(start)?;
+                self.update_head_target(start, Some(head), "cherry-pick: abort")?;
+            }
+            _ => self.checkout_tree_forced_to(head)?,
+        }
+        self.clear_sequencer()?;
         self.clear_pick_state()
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // multi-commit sequences, in Git's `.git/sequencer/` format
+
+    fn sequencer_dir(&self) -> PathBuf {
+        self.git_dir().join("sequencer")
+    }
+
+    fn sequencer_start(&self) -> Option<ObjectId> {
+        let text = std::fs::read_to_string(self.sequencer_dir().join("head")).ok()?;
+        ObjectId::from_hex(text.trim().as_bytes()).ok()
+    }
+
+    /// The commits a stopped multi-commit cherry-pick or revert still has to apply; the first
+    /// one is the commit it stopped on. Empty when there is no such sequence.
+    pub fn sequencer_todo(&self) -> Result<Vec<(PickKind, ObjectId)>> {
+        let Ok(text) = std::fs::read_to_string(self.sequencer_dir().join("todo")) else { return Ok(Vec::new()) };
+        let mut out = Vec::new();
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            let (verb, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+            let kind = match verb {
+                "pick" | "p" => PickKind::CherryPick,
+                "revert" => PickKind::Revert,
+                other => bail!("unsupported step `{other}` in .git/sequencer/todo; continue with git"),
+            };
+            let id = rest.split_whitespace().next().context("sequencer step without a commit")?;
+            out.push((kind, self.rev_parse_commit(id)?));
+        }
+        Ok(out)
+    }
+
+    /// Record a stopped sequence: where it started and what is left (the stopped commit first).
+    pub fn save_sequencer(&self, start: ObjectId, todo: &[(PickKind, ObjectId)]) -> Result<()> {
+        let dir = self.sequencer_dir();
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("head"), format!("{start}\n"))?;
+        if let Some(head) = self.head_commit_id()? {
+            std::fs::write(dir.join("abort-safety"), format!("{head}\n"))?;
+        }
+        let todo: String = todo
+            .iter()
+            .map(|(kind, id)| {
+                let verb = if *kind == PickKind::Revert { "revert" } else { "pick" };
+                let subject = self.commit_info(*id).map(|c| c.summary().to_owned()).unwrap_or_default();
+                format!("{verb} {id} {subject}\n")
+            })
+            .collect();
+        std::fs::write(dir.join("todo"), todo)?;
+        Ok(())
+    }
+
+    pub fn clear_sequencer(&self) -> Result<()> {
+        match std::fs::remove_dir_all(self.sequencer_dir()) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Where a stopped sequence started, if one is in progress.
+    pub fn sequence_start(&self) -> Option<ObjectId> {
+        self.sequencer_start()
     }
 
     /// Abort a stopped rebase: the branch was never moved, so return HEAD and files to it.
@@ -702,7 +1001,6 @@ impl Repo {
             Some(branch) => self.set_head_symbolic(branch, &format!("rebase (abort): returning to {branch}"))?,
             None => self.set_head_detached(state.orig_head, "rebase (abort)")?,
         }
-        self.clear_pick_state()?;
         self.clear_rebase_state()
     }
 
@@ -725,11 +1023,14 @@ impl Repo {
         let mut state = self.rebase_in_progress()?.context("no rebase in progress")?;
         let mut picked = 0;
         let mut skipped = 0;
-        if self.pick_in_progress()?.is_some() {
+        let stopped = state.current.clone().or_else(|| {
+            // A rebase stopped by Veyra < 1.3 marked conflicts with CHERRY_PICK_HEAD.
+            self.pick_in_progress().ok().flatten().map(|(_, c)| RebaseStep::new(RebaseAction::Pick, c))
+        });
+        if let Some(step) = stopped {
             if skip {
                 let head = self.head_commit_id()?.context("rebase lost HEAD")?;
                 self.reset(head, crate::checkout::ResetMode::Hard)?;
-                self.clear_pick_state()?;
                 skipped += 1;
             } else {
                 let index = self.load_index()?;
@@ -739,25 +1040,57 @@ impl Repo {
                     );
                 }
                 if self.flat_index()? == self.flat_head()? {
-                    // The resolution made the commit empty: drop it, like `git rebase --continue`.
-                    self.clear_pick_state()?;
+                    // The resolution made the commit empty (or it was committed by hand): move on.
                     skipped += 1;
                 } else {
-                    self.continue_pick(None)?;
+                    let dir = self.rebase_dir();
+                    let original = self.commit_info(step.commit)?;
+                    let message = std::fs::read_to_string(dir.join("message")).unwrap_or(original.message);
+                    let author = std::fs::read_to_string(dir.join("author-script"))
+                        .ok()
+                        .and_then(|t| parse_author_script(&t))
+                        .map(Ok)
+                        .unwrap_or_else(|| {
+                            self.git.find_commit(step.commit)?.author()?.to_owned().map_err(anyhow::Error::from)
+                        })?;
+                    self.clear_pick_state()?;
+                    self.commit(&CommitRequest {
+                        message,
+                        author: Some(author),
+                        allow_empty: true,
+                        ..Default::default()
+                    })?;
                     picked += 1;
-                    if let Some(step) = state.current.clone() {
-                        self.after_rebase_pick(&step, editor)?;
-                        if step.action == RebaseAction::Edit {
-                            state.current = None;
-                            self.save_rebase_state(&state)?;
-                            return Ok(RebaseOutcome::Edit { commit: step.commit, remaining: state.todo.len() });
-                        }
+                    self.after_rebase_pick(&step, editor)?;
+                    if step.action == RebaseAction::Edit {
+                        state.current = None;
+                        state.amend = self.head_commit_id()?;
+                        self.save_rebase_state(&state)?;
+                        self.record_rebase_stop(step.commit)?;
+                        return Ok(RebaseOutcome::Edit { commit: step.commit, remaining: state.todo.len() });
                     }
                 }
             }
+            self.clear_rebase_stop()?;
+        } else if let Some(amend) = state.amend {
+            // Stopped at `edit`: staged changes amend that commit, like `git rebase --continue`.
+            if self.head_commit_id()? == Some(amend) && self.flat_index()? != self.flat_head()? {
+                let info = self.commit_info(amend)?;
+                self.commit(&CommitRequest { message: info.message, amend: true, ..Default::default() })?;
+            }
+            self.clear_rebase_stop()?;
         }
         state.current = None;
+        state.amend = None;
         self.run_rebase(state, picked, skipped, editor)
+    }
+}
+
+fn remove_if_exists(path: &std::path::Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("could not remove {}", path.display())),
     }
 }
 
@@ -766,29 +1099,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rebase_state_round_trips() {
-        let a = ObjectId::from_hex(b"1111111111111111111111111111111111111111").unwrap();
-        let b = ObjectId::from_hex(b"2222222222222222222222222222222222222222").unwrap();
-        let pick = |commit| RebaseStep::new(RebaseAction::Pick, commit);
-        let state = RebaseState {
-            branch: Some("refs/heads/topic".into()),
-            orig_head: a,
-            onto: b,
-            todo: vec![
-                pick(a),
-                RebaseStep::new(RebaseAction::Squash, b),
-                RebaseStep {
-                    action: RebaseAction::Exec,
-                    commit: ObjectId::null(gix::hash::Kind::Sha1),
-                    command: Some("cargo test --quiet".into()),
-                },
-                RebaseStep::new(RebaseAction::Break, ObjectId::null(gix::hash::Kind::Sha1)),
-            ],
-            current: Some(RebaseStep::new(RebaseAction::Reword, b)),
+    fn legacy_rebase_state_is_still_read() {
+        let text = "branch refs/heads/topic\norig-head 1111111111111111111111111111111111111111\nonto 2222222222222222222222222222222222222222\ncurrent reword 2222222222222222222222222222222222222222\npick 1111111111111111111111111111111111111111\nexec cargo test\nbreak\n";
+        let state = RebaseState::from_legacy_text(text).unwrap();
+        assert_eq!(state.branch.as_deref(), Some("refs/heads/topic"));
+        assert_eq!(state.todo.len(), 3);
+        assert_eq!(state.current.unwrap().action, RebaseAction::Reword);
+    }
+
+    #[test]
+    fn author_scripts_round_trip_like_git() {
+        let sig = gix::actor::Signature {
+            name: "Jo O'Neil".into(),
+            email: "jo@example.com".into(),
+            time: gix::date::Time { seconds: 1_700_000_000, offset: -5 * 3600 - 1800 },
         };
-        assert_eq!(RebaseState::from_text(&state.to_text()).unwrap(), state);
-        let detached = RebaseState { branch: None, current: None, todo: vec![], ..state };
-        assert_eq!(RebaseState::from_text(&detached.to_text()).unwrap(), detached);
+        let script = author_script(&sig.to_ref(&mut Default::default()));
+        assert!(script.contains("GIT_AUTHOR_NAME='Jo O'\\''Neil'"), "{script}");
+        assert!(script.contains("GIT_AUTHOR_DATE='@1700000000 -0530'"), "{script}");
+        assert_eq!(parse_author_script(&script).unwrap(), sig);
     }
 
     #[test]
