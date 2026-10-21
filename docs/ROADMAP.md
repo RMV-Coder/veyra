@@ -83,17 +83,24 @@ to `git`, and the conformance suite covers every Phase 1–2 command on all thre
 identical token sequence *and* tree shape (so re-indenting Python is a change), renames require a
 token-identical, non-trivial body, and structural merges refuse anything they can't verify.
 
-## Phase 5 — Optional AI and domain analyzers
+## Phase 5 — Optional AI and domain analyzers ✅
 
-- `veyra ai configure / disable`, with local or remote providers. Never required; privacy mode by default.
-- `commit --smart` (message proposals) and `commit --split` (hunk-level proposals). The developer
-  always approves.
-- Assisted and Experimental merge modes (approval required for uncertain resolutions)
-- Migration and IaC analyzers as plugins (`analyze --migration`, Terraform and Kubernetes risk flags)
-- AI-proposed intent guards (a human accepts them; verification stays deterministic)
+- [x] `veyra ai configure / disable / status`: the Claude API (raw HTTPS; there is no official Rust
+      SDK) or any local model through the `command` provider. Off by default; keys only from the
+      environment; every payload is secret-scanned; `--dry-run` shows what would be sent.
+- [x] `commit --smart` (message proposals) and `commit --split` (file-level proposals, validated
+      before they are shown). The developer always approves.
+- [x] Assisted merge (`merge --assist`, `ai resolve`): proposals are checked for markers and syntax,
+      shown as a diff with a confidence, and uncertain ones always need a person
+- [x] `ai explain / review / summarize / risks` (risks build on the deterministic impact report)
+- [x] Migration and IaC analyzers (`analyze --migration / --infra`), extensible with repository rules
+      in `.veyra/analyzers.toml`
+- [x] AI-proposed intents (`intent suggest`): guards that don't hold are dropped; a human accepts
+- [ ] Hunk-level `commit --split`; out-of-process analyzer plugins
 
-**Exit criterion:** every AI feature has a deterministic fallback or degrades to "no suggestion",
-and none of them can change history without explicit approval.
+**Exit criterion:** met. Every AI feature degrades to "AI features are off" with no side effects,
+proposals are validated deterministically, and nothing changes history without explicit approval
+(`--yes` in scripts; never for low-confidence merge resolutions).
 
 ## Phase 6 — Production hardening → 1.0
 

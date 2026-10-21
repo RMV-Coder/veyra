@@ -43,7 +43,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | — | secret scan + intent check on commit | ✅ | `--allow-secrets`, `--no-verify` |
 | `git commit -S` / `commit.gpgSign` | `veyra commit -S` / `--no-gpg-sign` | ✅ | OpenPGP, X.509 or SSH per `gpg.format` / `user.signingKey` (via gitoxide). Merges, cherry-picks and rebases are signed too when `commit.gpgSign` is set. |
 | Git hooks | `pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, `pre-push`, `post-checkout`, `post-merge` | ✅ | `core.hooksPath` respected. Hooks run through Git for Windows' `sh` on Windows. Never run in repositories you don't own. `--no-verify` skips them. |
-| — | `veyra commit --smart` / `--split` | 🗓 5 | Optional AI. Always proposed, never automatic. |
+| — | `veyra commit --smart` / `--split` [`--dry-run`] | ✅ | Optional AI (see `veyra ai`). `--smart` proposes a message you accept, edit or reject; `--split` proposes a sequence of commits for the staged files, validated to cover every staged file exactly once before you see it. Each commit is a normal, undoable commit with an `Assisted-by:` trailer, and hooks and secret scanning still run. |
 
 ## History and inspection
 
@@ -88,7 +88,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git rebase -i` | `veyra rebase -i <upstream>` | ✅ | `pick`, `reword`, `edit`, `squash`, `fixup`, `drop`, `exec`, `break` (and their one-letter forms), plus reordering. Uses `GIT_SEQUENCE_EDITOR` / `sequence.editor`, then the commit editor. |
 | `git rerere` / `rerere forget` / `rerere clear` | `veyra merge resolutions [status\|list\|forget <path>\|clear\|enable [--auto-stage]\|disable]` (alias `veyra rerere …`) | ✅ | Git's own `.git/rr-cache` format and conflict ids: resolutions recorded by Veyra are replayed by Git and vice versa. Enabled by `rerere.enabled` (or an existing rr-cache). Replays apply to merges, cherry-picks, reverts, rebases and stash applications, slightly shifted conflicts included; `rerere.autoUpdate` stages them. Every replay is reported. |
 | — | structural merge (automatic in `merge`, `pull`, `cherry-pick`, `revert`, `rebase`, `stash apply/pop`) | ✅ | When Git's line merge conflicts but the two sides changed *different* top-level symbols, Veyra merges the file symbol by symbol. It refuses on syntax errors, same-symbol edits, delete-vs-modify and reorders on both sides, and re-parses the result. Every resolution is printed, and recorded as a `Veyra-Structural-Merge:` trailer. `veyra.structuralMerge` = `true` · `stage` (resolve, then stop for review) · `false`. |
-| — | `veyra merge --assist / --explain / --simulate` | 🗓 5 | |
+| — | `veyra merge <branch> --assist` / `veyra ai resolve [paths]` | ✅ | AI-proposed resolutions for the conflicts that remain after structural merge and rerere. Proposals that still contain markers or don't parse are discarded; the rest are shown as a diff with a confidence level. Accepting stages the file (journaled, so `veyra undo` restores the conflict). `--yes` accepts only *high*-confidence proposals; uncertain ones always need a person. |
 
 ## Undo, recovery and checkpoints (Veyra-only)
 
@@ -153,7 +153,10 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | — | `veyra verify --history [--rev R] [-n N]` | ✅ | Signature status of every commit (good / bad / unsigned) |
 | — | `veyra attest run [--sign] -- <cmd>` / `attest review [--reject] [--sign]` / `attest list` | ✅ | in-toto v1 Statements in Git notes (`refs/notes/veyra/attestations`), shareable with `veyra push origin refs/notes/veyra/attestations` |
 | — | `veyra verify --provenance [--rev R]` | ✅ | Lists a commit's attestations and checks their signatures |
-| — | `veyra ai …` | 🗓 5 | Optional; never required |
+| — | `veyra ai [status]` / `ai configure [--provider anthropic\|command] [--model M] [--effort E] [--command CMD] [--global]` / `ai disable` | ✅ | Off by default. `anthropic` uses the Claude API (default model `claude-opus-5-5`; the key comes from `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` and is never stored). `command` runs any local model: the request arrives as JSON on stdin, the answer is read from stdout. |
+| — | `veyra ai explain [REV\|--staged]` / `ai review [scope]` / `ai summarize [RANGE]` / `ai risks [scope]` | ✅ | Explanations, reviews (findings with severity and location, `--json`), PR/release summaries, and risk assessments built on the deterministic `impact` report. Every request is scanned for secrets first (nothing is sent if one is found), and `--dry-run` prints exactly what would be sent. |
+| — | `veyra intent suggest <paths> [--dry-run]` | ✅ | An AI-proposed intent with guards. Guards the current code doesn't satisfy are dropped before you see the proposal; you approve it before it's written. Verification stays deterministic. |
+| — | `veyra analyze [--migration] [--infra] [scope] [--fail-on high\|medium\|low] [--json]` | ✅ | Deterministic risk rules for what a change *adds*: SQL (DROP/TRUNCATE, DELETE/UPDATE without WHERE, NOT NULL without default, blocking index builds, renames, type changes…), ORM migrations (Rails, Django, Alembic, Knex), Terraform (destroyed resources, open ingress, public buckets, wildcard IAM, disabled protection/encryption), Kubernetes (privileged, host namespaces, root, `:latest`, zero replicas), Dockerfiles and CI workflows. Repository rules and `disable = [...]` in `.veyra/analyzers.toml`. `--fail-on` makes it a CI gate. |
 
 ## Plumbing
 
@@ -182,6 +185,12 @@ automated tests, supports it.
 | `veyra.checkpointExclude` | — | Multi-valued globs never snapshotted (beyond `.gitignore`) |
 | `veyra.secretsPolicy` | `block` | `block` · `warn` · `off` for high-confidence findings on commit |
 | `veyra.intentPolicy` | `warn` | `warn` · `block` · `off` for guard violations on commit |
+| `veyra.ai.provider` | `off` | `anthropic` · `command` · `off` |
+| `veyra.ai.model` | `claude-opus-5-5` | Claude API model |
+| `veyra.ai.effort` | `medium` | `low` · `medium` · `high` · `xhigh` · `max` |
+| `veyra.ai.command` | — | Local model command for `provider = command` |
+| `veyra.ai.fallbacks` | `true` | Claude API server-side refusal fallbacks (`fallbacks: "default"`) |
+| `veyra.ai.maxTokens` | `16000` | Output limit per request |
 | `veyra.structuralMerge` | `true` | `true` · `stage` · `false`: resolve conflicts in different symbols automatically, resolve and stop for review, or never |
 
 Committed, shared policy:

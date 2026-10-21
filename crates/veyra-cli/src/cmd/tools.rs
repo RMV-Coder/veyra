@@ -48,13 +48,13 @@ impl FileSource for TreeSource<'_> {
 }
 
 /// Files in the working tree: tracked (minus deleted) plus untracked, non-ignored.
-struct WorktreeSource {
+pub(crate) struct WorktreeSource {
     root: std::path::PathBuf,
     paths: Vec<String>,
 }
 
 impl WorktreeSource {
-    fn new(repo: &Repo) -> Result<Self> {
+    pub(crate) fn new(repo: &Repo) -> Result<Self> {
         let changes = repo.worktree_changes()?;
         let deleted: BTreeSet<_> = changes.deleted.iter().collect();
         let mut paths: Vec<String> =
@@ -80,7 +80,7 @@ impl FileSource for WorktreeSource {
     }
 }
 
-fn load_policy(repo: &Repo) -> Result<Policy> {
+pub(crate) fn load_policy(repo: &Repo) -> Result<Policy> {
     let path = repo.workdir()?.join(SECRETS_FILE);
     match std::fs::read_to_string(&path) {
         Ok(text) => Policy::from_toml(&text),
@@ -468,6 +468,7 @@ pub fn intent(ctx: &Ctx, command: IntentCommand) -> Result<()> {
             veyra_intent::save(&root, &intent)?;
             anstream::println!("Intent {} is now {}. Commit the change to share it.", intent.id, intent.status);
         }
+        IntentCommand::Suggest { paths, dry_run } => return super::ai::intent_suggest(ctx, &paths, dry_run),
         IntentCommand::Log { id } => {
             let all = veyra_intent::load_all(&root)?;
             let (_, intent) = veyra_intent::find(&all, &id)?;

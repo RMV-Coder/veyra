@@ -323,6 +323,7 @@ pub fn checkout(
     resolve_switch_target(&repo, &target).map(|_| ()).and_then(|_| switch(ctx, Some(target), None, false, force))
 }
 
+#[allow(clippy::too_many_arguments)] // one parameter per `veyra merge` flag
 pub fn merge(
     ctx: &Ctx,
     revision: Option<String>,
@@ -331,6 +332,7 @@ pub fn merge(
     message: Option<String>,
     abort: bool,
     continue_: bool,
+    assist: bool,
 ) -> Result<()> {
     let repo = ctx.repo()?;
     if abort {
@@ -356,6 +358,9 @@ pub fn merge(
                 no_verify: false,
                 gpg_sign: false,
                 no_gpg_sign: false,
+                smart: false,
+                split: false,
+                dry_run: false,
             },
         );
     }
@@ -398,6 +403,15 @@ pub fn merge(
         MergeOutcome::Conflicts { paths } => {
             for p in &paths {
                 anstream::println!("CONFLICT (content): merge conflict in {p}");
+            }
+            if assist {
+                super::ai::resolve(ctx, &[], false)?;
+                if veyra_core::Repo::discover(&ctx.cwd)?.load_index()?.entries().iter().all(|e| e.stage_raw() == 0) {
+                    anstream::println!(
+                        "All conflicts are resolved; review, then `veyra commit` to conclude the merge."
+                    );
+                    return Ok(());
+                }
             }
             anstream::println!(
                 "Automatic merge failed; fix conflicts, `veyra add` them, then `veyra commit`.\n`veyra merge --abort` (or `veyra undo`) returns to the state before the merge."

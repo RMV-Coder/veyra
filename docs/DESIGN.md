@@ -79,10 +79,10 @@ engineering corrections that make it buildable and safe. Each is labelled **Keep
 │ veyra-cli        argument parsing, output (human / --json),      │
 │                  orchestration, explain, doctor                  │
 ├───────────────┬───────────────┬──────────────────┬───────────────┤
-│ veyra-ops     │ veyra-intent  │ veyra-security   │ (Phase 4+)    │
-│ operation log │ intent files  │ secret scanner   │ semantic diff │
-│ undo / redo   │ guards        │ allowlist        │ impact        │
-│ checkpoints   │ verification  │                  │ AI providers  │
+│ veyra-ops     │ veyra-intent  │ veyra-security   │ veyra-semantic│
+│ operation log │ intent files  │ secret scanner   │ veyra-analyze │
+│ undo / redo   │ guards        │ allowlist        │ veyra-ai      │
+│ checkpoints   │ verification  │                  │               │
 ├───────────────┴───────────────┴──────────────────┴───────────────┤
 │ veyra-core       repository facade: status, add, commit, refs,   │
 │                  worktree read/write, flat trees, diff, merge    │
@@ -102,6 +102,9 @@ engineering corrections that make it buildable and safe. Each is labelled **Keep
 | `veyra-ops` | The operation journal, views, undo/redo, op restore, checkpoints and retention. | core |
 | `veyra-security` | Secret detection rules, fingerprints and allowlists. Pure, with no repository access. | regex |
 | `veyra-intent` | Intent records (TOML), guard evaluation and ID generation. Pure, with no repository access. | toml, globset, regex |
+| `veyra-semantic` | Tree-sitter symbol extraction, semantic diff, structural merge, imports. Pure. | tree-sitter + grammars |
+| `veyra-analyze` | Migration and infrastructure risk rules, repository rules. Pure. | regex, globset, toml |
+| `veyra-ai` | Optional AI: providers (Claude API over HTTPS, local command) and task prompts with JSON schemas. No repository access; the CLI decides what is sent. | reqwest, serde_json |
 | `veyra-cli` | The `veyra` binary. | all of the above |
 
 The pure crates (`security`, `intent`) take bytes and paths instead of repositories. That makes
@@ -118,6 +121,7 @@ them trivial to unit-test and to reuse in CI tools and editor plugins.
 | `refs/veyra/keep` | A commit that keeps snapshot trees, index trees and orphaned commits reachable so `git gc` won't prune them | Not pushed by default |
 | `.veyra/intents/*.toml` | Intent records, committed and reviewed | Yes |
 | `.veyra/secrets.toml` | Secret-scan allowlist and custom rules, committed | Yes |
+| `.veyra/analyzers.toml` | Repository rules for `veyra analyze`, committed | Yes |
 | `.veyra/scopes.toml` | Named directory sets for `clone --scope` / `sparse set --scope`, committed | Yes |
 | `refs/notes/veyra/attestations` | in-toto attestations about commits (Git notes) | Push explicitly |
 | `.git/rr-cache/`, `.git/MERGE_RR` | Recorded conflict resolutions — Git's own format, shared with `git rerere` | No |

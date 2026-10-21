@@ -262,3 +262,24 @@ fn undo_of_add_only_unstages() {
     assert!(fx.repo.status().unwrap().staged.is_empty());
     assert_eq!(fx.read("b.txt").as_deref(), Some("new\n"));
 }
+
+#[test]
+fn a_torn_final_line_from_a_crash_does_not_poison_later_operations() {
+    let f = Fixture::new();
+    f.write("a.txt", "one");
+    f.commit_all("first");
+    let path = f.repo.veyra_dir().join("oplog.jsonl");
+    // Simulate a crash in the middle of appending a record.
+    let mut data = std::fs::read(&path).unwrap();
+    data.extend_from_slice(b"{\"id\":\"deadbeef\",\"time\":1,\"comm");
+    std::fs::write(&path, data).unwrap();
+    assert_eq!(f.log().operations().unwrap().len(), 2, "the torn line is ignored when reading");
+
+    f.write("a.txt", "two");
+    f.commit_all("second");
+    let ops = f.log().operations().unwrap();
+    assert_eq!(ops.len(), 4, "appending after a torn line keeps the log readable");
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("deadbeef"));
+    f.log().undo(None, false, false, "veyra undo").unwrap();
+    assert_eq!(f.read("a.txt").as_deref(), Some("two"));
+}

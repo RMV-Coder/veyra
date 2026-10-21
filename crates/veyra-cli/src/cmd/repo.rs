@@ -347,6 +347,12 @@ pub(crate) fn rebase_message_editor(repo: &Repo) -> impl FnMut(&str) -> Result<S
 }
 
 pub fn commit(ctx: &Ctx, args: CommitArgs) -> Result<()> {
+    if args.split {
+        return super::ai::split_commit(ctx, args);
+    }
+    if args.smart && args.dry_run {
+        return super::ai::smart_commit(ctx, args);
+    }
     let repo = ctx.repo()?;
     repo.require_identity()?;
     let picking = repo.pick_in_progress()?.is_some();
@@ -390,12 +396,16 @@ pub fn commit(ctx: &Ctx, args: CommitArgs) -> Result<()> {
             repo.run_hook("pre-commit", &[], None)?;
             super::tools::pre_commit_checks(&repo, args.allow_secrets)?;
         }
-        let message = commit_message(&repo, &args, merging)?;
+        let message = if args.smart {
+            super::ai::propose_commit_message(ctx, &repo)?
+        } else {
+            commit_message(&repo, &args, merging)?
+        };
         // prepare-commit-msg and commit-msg may rewrite the message file, like in git.
         let msg_file = repo.git_dir().join("COMMIT_EDITMSG");
         std::fs::write(&msg_file, &message)?;
         let msg_path = msg_file.to_string_lossy().into_owned();
-        let source = if !args.message.is_empty() || args.file.is_some() {
+        let source = if !args.message.is_empty() || args.file.is_some() || args.smart {
             "message"
         } else if merging {
             "merge"
@@ -415,7 +425,7 @@ pub fn commit(ctx: &Ctx, args: CommitArgs) -> Result<()> {
         if !args.no_verify {
             repo.run_hook("commit-msg", &[msg_path.as_str()], None)?;
         }
-        let from_editor = args.message.is_empty() && args.file.is_none() && !args.no_edit;
+        let from_editor = args.message.is_empty() && args.file.is_none() && !args.no_edit && !args.smart;
         let message = veyra_core::commit::clean_message(&std::fs::read_to_string(&msg_file)?, from_editor);
         if message.trim().is_empty() {
             bail!("aborting commit due to empty commit message");

@@ -1529,3 +1529,212 @@ fn rerere_records_replays_and_shares_resolutions_with_git() {
     assert!(all.contains("previous resolution"), "{all}");
     assert_eq!(env.read("a.txt").as_deref(), Some(resolved));
 }
+
+/// Configure a fake local model: a shell script that answers by task and logs every request.
+fn fake_ai(env: &Env) -> PathBuf {
+    let script = env.home.join("fake-ai.sh");
+    let log = env.home.join("ai-requests.log");
+    let body = r#"#!/bin/sh
+input=$(cat)
+printf '%s\n----\n' "$input" >> "LOG"
+case "$input" in
+  *staged_files*) printf '%s
+' '{"commits":[{"message":"feat: add a","files":["a.txt"]},{"message":"docs: add b","files":["b.txt"]}]}' ;;
+  *conflicted_file*) printf '%s
+' '{"resolved":"start\nmain and topic\nend\n","confidence":"CONF","explanation":"Kept both."}' ;;
+  *staged_diff*) printf '%s
+' '{"subject":"feat: add greeting","body":"Adds a friendly greeting."}' ;;
+  *findings*|*senior\ engineer*) printf '%s
+' '{"summary":"Looks fine.","findings":[{"severity":"medium","file":"a.txt","line":1,"title":"Typo","detail":"Hello is misspelled."}]}' ;;
+  *) printf '%s
+' 'This change adds a greeting file.' ;;
+esac
+"#
+    .replace("LOG", &log.to_string_lossy().replace('\\', "/"));
+    std::fs::write(&script, body).unwrap();
+    let cmd = format!("sh {}", script.to_string_lossy().replace('\\', "/"));
+    env.ok(&["ai", "configure", "--provider", "command", "--command", &cmd]);
+    log
+}
+
+#[test]
+fn ai_is_off_by_default_and_never_sends_without_configuration() {
+    require_git!();
+    let env = Env::new();
+    assert!(env.ok(&["ai"]).contains("AI provider: off"));
+    env.write("a.txt", "hello\n");
+    env.ok(&["add", "a.txt"]);
+    env.veyra(&["commit", "--smart", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("AI features are off"));
+    assert_eq!(env.git(&["for-each-ref", "refs/heads"]), "", "no commit was made");
+}
+
+#[test]
+fn smart_commit_proposes_a_message_and_needs_approval() {
+    require_git!();
+    let env = Env::new();
+    let log = fake_ai(&env);
+    env.write("a.txt", "hello\n");
+    env.ok(&["add", "a.txt"]);
+
+    // Without approval (no terminal, no --yes) nothing is committed.
+    env.veyra(&["commit", "--smart"]).assert().failure().stderr(predicate::str::contains("needs approval"));
+    assert_eq!(env.git(&["for-each-ref", "refs/heads"]), "", "no commit was made");
+
+    let out = env.ok(&["commit", "--smart", "--yes"]);
+    assert!(out.contains("feat: add greeting"), "{out}");
+    let msg = env.git(&["log", "-1", "--format=%B"]);
+    assert!(msg.starts_with("feat: add greeting\n\nAdds a friendly greeting."), "{msg}");
+    assert!(msg.contains("Assisted-by: local model via veyra ai"), "{msg}");
+    let sent = std::fs::read_to_string(&log).unwrap();
+    assert!(sent.contains("+hello"), "the staged diff is what gets sent: {sent}");
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn secrets_are_never_sent_and_dry_run_sends_nothing() {
+    require_git!();
+    let env = Env::new();
+    let log = fake_ai(&env);
+    env.write("config.txt", &format!("token = ghp_{}\n", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"));
+    env.ok(&["add", "config.txt"]);
+    env.veyra(&["ai", "explain", "--staged"]).assert().failure().stderr(predicate::str::contains("nothing was sent"));
+    assert!(!log.exists(), "nothing reached the provider");
+
+    env.write("config.txt", "token = (from the environment)\n");
+    env.ok(&["add", "config.txt"]);
+    let out = env.ok(&["commit", "--smart", "--dry-run"]);
+    assert!(out.contains("Would send to: local command"), "{out}");
+    assert!(out.contains("<staged_diff>"), "{out}");
+    assert!(!log.exists(), "a dry run sends nothing");
+}
+
+#[test]
+fn split_commit_validates_the_plan_and_makes_each_commit() {
+    require_git!();
+    let env = Env::new();
+    fake_ai(&env);
+    env.commit_file("README.md", "# x\n", "init");
+    env.write("a.txt", "a\n");
+    env.write("b.txt", "b\n");
+    env.ok(&["add", "a.txt", "b.txt"]);
+    let out = env.ok(&["commit", "--split", "--yes"]);
+    assert!(out.contains("Proposed: 2 commits"), "{out}");
+    assert_eq!(env.git(&["log", "--format=%s", "-2"]), "docs: add b\nfeat: add a\n");
+    assert_eq!(env.git(&["show", "--name-only", "--format=", "HEAD~1"]).trim(), "a.txt");
+    env.assert_git_clean_and_valid();
+
+    // A plan that doesn't cover the staged files is refused, and nothing changes.
+    env.write("c.txt", "c\n");
+    env.write("d.txt", "d\n");
+    env.ok(&["add", "c.txt", "d.txt"]);
+    env.veyra(&["commit", "--split", "--yes"]).assert().failure().stderr(predicate::str::contains("not usable"));
+    assert_eq!(env.git(&["status", "--porcelain"]), "A  c.txt\nA  d.txt\n");
+}
+
+#[test]
+fn ai_explain_and_review_print_the_answer() {
+    require_git!();
+    let env = Env::new();
+    fake_ai(&env);
+    env.commit_file("a.txt", "helo\n", "init");
+    env.write("a.txt", "hello\n");
+    assert!(env.ok(&["ai", "explain"]).contains("adds a greeting file"));
+    let out = env.ok(&["ai", "review"]);
+    assert!(out.contains("Typo") && out.contains("a.txt:1"), "{out}");
+    let json: serde_json::Value = serde_json::from_str(&env.ok(&["ai", "review", "--json"])).unwrap();
+    assert_eq!(json["findings"][0]["severity"], "medium");
+}
+
+#[test]
+fn assisted_merge_needs_approval_and_uncertain_proposals_a_human() {
+    require_git!();
+    let env = Env::new();
+    let log = fake_ai(&env);
+    env.commit_file("a.txt", "start\nbase\nend\n", "base");
+    env.ok(&["switch", "-c", "topic"]);
+    env.commit_file("a.txt", "start\ntopic\nend\n", "topic");
+    env.ok(&["switch", "main"]);
+    env.commit_file("a.txt", "start\nmain\nend\n", "main");
+
+    // Low confidence: even --yes doesn't accept it.
+    let script = env.home.join("fake-ai.sh");
+    let s = std::fs::read_to_string(&script).unwrap();
+    std::fs::write(&script, s.replace("CONF", "low")).unwrap();
+    env.veyra(&["merge", "topic"]).assert().failure();
+    let out = env.veyra(&["ai", "resolve", "--yes"]).output().unwrap();
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(all.contains("needs interactive approval"), "{all}");
+    assert!(env.read("a.txt").unwrap().contains("<<<<<<<"));
+    env.ok(&["merge", "--abort"]);
+
+    // High confidence with --yes: resolved, staged, and undoable.
+    std::fs::write(&script, s.replace("CONF", "high")).unwrap();
+    let out = env.veyra(&["merge", "topic", "--assist", "--yes"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Resolved and staged a.txt"), "{stdout}");
+    assert_eq!(env.read("a.txt").as_deref(), Some("start\nmain and topic\nend\n"));
+    assert_eq!(env.git(&["status", "--porcelain"]), "M  a.txt\n");
+    assert!(std::fs::read_to_string(&log).unwrap().contains("<ours_version>"));
+    env.ok(&["undo"]);
+    assert!(env.read("a.txt").unwrap().contains("<<<<<<<"), "undo brings the conflict back");
+}
+
+#[test]
+fn analyze_flags_risky_migrations_and_infrastructure() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("infra/main.tf", "resource \"aws_db_instance\" \"main\" {}\n", "infra");
+    env.write(
+        "db/migrations/002_cleanup.sql",
+        "ALTER TABLE users DROP COLUMN email;\nCREATE INDEX idx ON orders (created_at);\n",
+    );
+    env.write("infra/main.tf", "resource \"aws_security_group\" \"web\" {\n  cidr_blocks = [\"0.0.0.0/0\"]\n}\n");
+    env.write("src/app.py", "print('no risk here')\n");
+    env.ok(&["add", "."]);
+
+    let out = env.ok(&["analyze", "--staged"]);
+    assert!(out.contains("db/migrations/002_cleanup.sql:1") && out.contains("[drop-column]"), "{out}");
+    assert!(out.contains("[index-without-concurrently]"), "{out}");
+    assert!(out.contains("[tf-resource-removed]") && out.contains("aws_db_instance.main"), "{out}");
+    assert!(out.contains("[tf-open-ingress]"), "{out}");
+    assert!(!out.contains("app.py"), "{out}");
+
+    let only: serde_json::Value =
+        serde_json::from_str(&env.ok(&["analyze", "--staged", "--migration", "--json"])).unwrap();
+    assert!(only.as_array().unwrap().iter().all(|f| f["area"] == "migration"), "{only}");
+
+    // CI gate, repository rules and disabling built-ins.
+    env.veyra(&["analyze", "--staged", "--fail-on", "high"]).assert().failure();
+    env.write(
+        ".veyra/analyzers.toml",
+        "disable = [\"index-without-concurrently\"]\n\n[[rule]]\nid = \"no-print\"\npaths = [\"src/**\"]\npattern = \"print\\\\(\"\nseverity = \"low\"\nmessage = \"use the logger\"\n",
+    );
+    let out = env.ok(&["analyze", "--staged"]);
+    assert!(!out.contains("index-without-concurrently"), "{out}");
+    assert!(out.contains("src/app.py:1") && out.contains("[no-print]"), "{out}");
+}
+
+#[test]
+fn intent_suggest_keeps_only_guards_that_hold() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("src/pay.ts", "export function charge() { return idempotencyKey(); }\n", "pay");
+    let script = env.home.join("intent-ai.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' '{\"title\":\"Charges are idempotent\",\"kind\":\"decision\",\"objective\":\"Never double-charge\",\"constraints\":[\"Keep the idempotency key\"],\"guards\":[{\"paths\":[\"src/pay.ts\"],\"must_contain\":\"idempotencyKey\",\"must_not_contain\":null,\"message\":\"keep idempotency\"},{\"paths\":[\"src/pay.ts\"],\"must_contain\":\"retryTwice\",\"must_not_contain\":null,\"message\":\"bogus\"}]}'\n",
+    )
+    .unwrap();
+    let cmd = format!("sh {}", script.to_string_lossy().replace('\\', "/"));
+    env.ok(&["ai", "configure", "--command", &cmd]);
+    let out = env.veyra(&["intent", "suggest", "src", "--yes"]).output().unwrap();
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "{all}");
+    assert!(all.contains("Intent recorded") && all.contains("dropped a proposed guard"), "{all}");
+    let list = env.ok(&["intent", "list"]);
+    assert!(list.contains("Charges are idempotent"), "{list}");
+    assert!(env.ok(&["intent", "verify"]).contains("All guards of 1 intent hold"));
+}

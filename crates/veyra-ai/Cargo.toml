@@ -1,0 +1,15 @@
+[package]
+name = "veyra-ai"
+description = "Optional AI assistance for Veyra: providers (Claude API, local command) and task prompts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Same features gitoxide already enables, so no extra TLS stack is compiled.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls", "http2", "charset"] }

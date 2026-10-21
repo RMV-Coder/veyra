@@ -229,6 +229,7 @@ impl<'r> OpLog<'r> {
         std::fs::create_dir_all(&self.dir)?;
         let mut line = serde_json::to_string(op)?;
         line.push('\n');
+        self.drop_torn_tail()?;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -237,6 +238,36 @@ impl<'r> OpLog<'r> {
         file.write_all(line.as_bytes())?;
         file.sync_data().ok();
         self.protect(op)?;
+        Ok(())
+    }
+
+    /// A crash in the middle of an append leaves a partial last line. It's ignored when reading,
+    /// but appending after it would turn it into a corrupt line in the middle of the log, so cut
+    /// it off first (under the journal lock).
+    fn drop_torn_tail(&self) -> Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        let path = self.log_path();
+        let mut file = match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(f) => f,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err).context("could not open the operation log"),
+        };
+        let len = file.metadata()?.len();
+        if len == 0 {
+            return Ok(());
+        }
+        let mut last = [0u8; 1];
+        file.seek(SeekFrom::Start(len - 1))?;
+        file.read_exact(&mut last)?;
+        if last[0] == b'\n' {
+            return Ok(());
+        }
+        let mut data = Vec::new();
+        file.seek(SeekFrom::Start(0))?;
+        file.read_to_end(&mut data)?;
+        let keep = data.iter().rposition(|b| *b == b'\n').map(|i| i + 1).unwrap_or(0);
+        file.set_len(keep as u64)?;
+        file.sync_data().ok();
         Ok(())
     }
 

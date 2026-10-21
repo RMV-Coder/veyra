@@ -177,6 +177,9 @@ pub enum Command {
         /// Conclude the merge after resolving conflicts (same as `commit`).
         #[arg(long = "continue")]
         continue_: bool,
+        /// If conflicts remain, let the configured AI propose resolutions (each needs approval).
+        #[arg(long)]
+        assist: bool,
     },
     /// Move HEAD (and optionally the index and worktree) to a commit, or unstage paths.
     Reset {
@@ -331,6 +334,13 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<RerereCommand>,
     },
+    /// Deterministic risk checks for database migrations and infrastructure changes.
+    Analyze(AnalyzeArgs),
+    /// Optional AI assistance: off until configured, always a proposal you approve.
+    Ai {
+        #[command(subcommand)]
+        command: Option<AiCommand>,
+    },
     /// Check repository health.
     Doctor,
     /// What a change can affect: dependents, tests to run, co-changed files and risk, with evidence.
@@ -431,6 +441,88 @@ pub struct CommitArgs {
     /// Don't sign, even if `commit.gpgSign` is set.
     #[arg(long)]
     pub no_gpg_sign: bool,
+    /// Let the configured AI propose the message (you approve or edit it).
+    #[arg(long, conflicts_with_all = ["message", "file", "amend", "split"])]
+    pub smart: bool,
+    /// Let the configured AI propose splitting the staged files into several commits.
+    #[arg(long, conflicts_with_all = ["message", "file", "amend"])]
+    pub split: bool,
+    /// With --smart/--split: show what would be sent to the AI, send nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AiCommand {
+    /// Show the provider and privacy settings (default).
+    Status,
+    /// Turn AI assistance on: the Claude API (default) or a local command.
+    Configure {
+        /// `anthropic` (Claude API, ANTHROPIC_API_KEY), `command` (local model) or `off`.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Model for the Claude API (default claude-opus-5-5).
+        #[arg(long)]
+        model: Option<String>,
+        /// low · medium · high · xhigh · max.
+        #[arg(long)]
+        effort: Option<String>,
+        /// For `--provider command`: run this; it gets a JSON request on stdin and answers on stdout.
+        #[arg(long)]
+        command: Option<String>,
+        /// Write to the global Git config instead of this repository's.
+        #[arg(long)]
+        global: bool,
+    },
+    /// Turn AI assistance off.
+    Disable {
+        #[arg(long)]
+        global: bool,
+    },
+    /// Propose a commit message (or, with --split, several commits) for the staged changes.
+    Commit {
+        #[arg(long)]
+        split: bool,
+        /// Show what would be sent; send nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Explain a change in plain language (default: uncommitted changes).
+    Explain {
+        /// A commit to explain.
+        revision: Option<String>,
+        #[arg(long)]
+        staged: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Review a change for bugs, security issues and missing tests.
+    Review {
+        #[command(flatten)]
+        scope: ScopeArgs,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Summarize commits for a PR description or release notes (default: this branch).
+    Summarize {
+        /// `A..B`, or a base revision (default: where this branch forked from the default branch).
+        range: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Risks of a change, on top of the deterministic `veyra impact` report.
+    Risks {
+        #[command(flatten)]
+        scope: ScopeArgs,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Propose resolutions for conflicted files; each one needs your approval.
+    Resolve {
+        paths: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -474,17 +566,39 @@ pub struct DiffArgs {
     pub paths: Vec<String>,
 }
 
-#[derive(Args, Debug)]
-pub struct ImpactArgs {
-    /// Analyse only the staged changes (default: all uncommitted changes).
+/// Which change to look at: uncommitted (default), staged, one commit, or a whole branch.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ScopeArgs {
+    /// Only the staged changes (default: all uncommitted changes).
     #[arg(long, alias = "cached")]
     pub staged: bool,
-    /// Analyse one commit.
+    /// One commit.
     #[arg(long, value_name = "REV", conflicts_with_all = ["staged", "branch"])]
     pub commit: Option<String>,
-    /// Analyse the whole branch since it forked from BASE (default: the default branch).
+    /// The whole branch since it forked from BASE (default: the default branch).
     #[arg(long, value_name = "BASE", num_args = 0..=1, default_missing_value = "", conflicts_with = "staged")]
     pub branch: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AnalyzeArgs {
+    #[command(flatten)]
+    pub scope: ScopeArgs,
+    /// Only database migrations (SQL and ORM migrations).
+    #[arg(long)]
+    pub migration: bool,
+    /// Only infrastructure (Terraform, Kubernetes, Dockerfiles, CI workflows).
+    #[arg(long)]
+    pub infra: bool,
+    /// Exit with an error if there is a finding at this severity or above (high, medium, low).
+    #[arg(long, value_name = "SEVERITY")]
+    pub fail_on: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ImpactArgs {
+    #[command(flatten)]
+    pub scope: ScopeArgs,
     /// Only list the tests to run.
     #[arg(long)]
     pub tests: bool,
@@ -774,6 +888,14 @@ pub enum IntentCommand {
     /// Commits linked to an intent via `Intent:` trailers.
     Log {
         id: String,
+    },
+    /// Let the configured AI propose an intent with guards for these files (you approve it).
+    /// Proposed guards that the current code doesn't satisfy are dropped.
+    Suggest {
+        #[arg(required = true)]
+        paths: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

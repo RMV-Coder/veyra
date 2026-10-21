@@ -1,5 +1,6 @@
 //! Command implementations.
 
+mod ai;
 mod analysis;
 mod branch;
 mod history;
@@ -46,8 +47,8 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
         Merge { command: Some(crate::cli::MergeCommand::Resolutions { command }), .. } | Rerere { command } => {
             tools::rerere(ctx, command)
         }
-        Merge { command: None, revision, ff_only, no_ff, message, abort, continue_ } => {
-            branch::merge(ctx, revision, ff_only, no_ff, message, abort, continue_)
+        Merge { command: None, revision, ff_only, no_ff, message, abort, continue_, assist } => {
+            branch::merge(ctx, revision, ff_only, no_ff, message, abort, continue_, assist)
         }
         Reset { soft, mixed: _, hard, target, paths } => branch::reset(ctx, soft, hard, target, paths),
         Tag(args) => branch::tag(ctx, args),
@@ -73,6 +74,8 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
         Explain { command } => crate::explain::run(ctx, &command),
         Doctor => tools::doctor(ctx),
         Impact(args) => analysis::impact(ctx, args),
+        Analyze(args) => analysis::analyze(ctx, args),
+        Ai { command } => ai::run(ctx, command.unwrap_or(crate::cli::AiCommand::Status)),
         Verify(args) => tools::verify(ctx, args),
         Attest { command } => tools::attest(ctx, command),
         Storage { command } => tools::storage(ctx, command),

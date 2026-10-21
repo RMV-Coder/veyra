@@ -7,11 +7,11 @@ use veyra_core::impact::{Confidence, ImpactOptions, ImpactReport, RiskLevel};
 use veyra_core::worktree::SnapshotOptions;
 use veyra_core::{FlatTree, Repo};
 
-use crate::cli::ImpactArgs;
+use crate::cli::{AnalyzeArgs, ImpactArgs, ScopeArgs};
 use crate::{Ctx, ui};
 
 /// The old and new trees for the requested scope, plus a description of it.
-fn scope(repo: &Repo, args: &ImpactArgs) -> Result<(FlatTree, FlatTree, String)> {
+pub(crate) fn scope(repo: &Repo, args: &ScopeArgs) -> Result<(FlatTree, FlatTree, String)> {
     if let Some(rev) = &args.commit {
         let id = repo.rev_parse_commit(rev)?;
         let info = repo.commit_info(id)?;
@@ -56,7 +56,7 @@ fn scope(repo: &Repo, args: &ImpactArgs) -> Result<(FlatTree, FlatTree, String)>
 
 pub fn impact(ctx: &Ctx, args: ImpactArgs) -> Result<()> {
     let repo = ctx.repo()?;
-    let (old, new, what) = scope(&repo, &args)?;
+    let (old, new, what) = scope(&repo, &args.scope)?;
     let report = repo.impact(&old, &new, &ImpactOptions { history_limit: args.history })?;
     if ctx.json {
         if args.tests {
@@ -145,4 +145,89 @@ fn print_report(r: &ImpactReport, what: &str) {
     for l in &r.limitations {
         anstream::println!("  {}", ui::dim(&format!("- {l}")));
     }
+}
+
+/// The committed repository rules for `veyra analyze`.
+pub const ANALYZERS_FILE: &str = ".veyra/analyzers.toml";
+
+pub fn analyze(ctx: &Ctx, args: AnalyzeArgs) -> Result<()> {
+    use veyra_analyze::{Analyzer, Area, ChangedFile, Severity};
+    use veyra_core::ByteSlice;
+    let repo = ctx.repo()?;
+    let threshold = match &args.fail_on {
+        Some(s) => Some(Severity::parse(s).context("--fail-on takes high, medium or low")?),
+        None => None,
+    };
+    let (old, new, what) = scope(&repo, &args.scope)?;
+    let analyzer = match std::fs::read_to_string(repo.workdir()?.join(ANALYZERS_FILE)) {
+        Ok(text) => Analyzer::from_toml(&text)?,
+        Err(_) => Analyzer::new(&Default::default())?,
+    };
+    let text = |e: Option<veyra_core::FlatEntry>| -> Result<Option<String>> {
+        Ok(match e {
+            Some(e)
+                if matches!(
+                    e.kind,
+                    veyra_core::gix::objs::tree::EntryKind::Blob
+                        | veyra_core::gix::objs::tree::EntryKind::BlobExecutable
+                ) =>
+            {
+                let data = repo.read_blob(e.id)?;
+                (!veyra_core::diff::is_binary(&data)).then(|| data.to_str_lossy().into_owned())
+            }
+            _ => None,
+        })
+    };
+    let changes = veyra_core::flat::diff(&old, &new);
+    let mut contents = Vec::new();
+    for c in &changes {
+        contents.push((c.path.to_str_lossy().into_owned(), text(c.old)?, text(c.new)?));
+    }
+    let files: Vec<ChangedFile<'_>> =
+        contents.iter().map(|(p, o, n)| ChangedFile { path: p, old: o.as_deref(), new: n.as_deref() }).collect();
+    let both = !args.migration && !args.infra;
+    let findings: Vec<_> = analyzer
+        .analyze(&files)
+        .into_iter()
+        .filter(|f| match f.area {
+            Area::Migration => both || args.migration,
+            Area::Infra => both || args.infra,
+            Area::Custom => true,
+        })
+        .collect();
+    if ctx.json {
+        ui::json(&serde_json::to_value(&findings)?);
+    } else if findings.is_empty() {
+        anstream::println!("No migration or infrastructure risks found in {what}.");
+    } else {
+        anstream::println!("{} in {what}\n", ui::bold(&format!("{} risk finding(s)", findings.len())));
+        for f in &findings {
+            let sev = match f.severity {
+                Severity::High => ui::red("high  "),
+                Severity::Medium => ui::yellow("medium"),
+                Severity::Low => ui::dim("low   "),
+            };
+            let loc = if f.line > 0 { format!("{}:{}", f.path, f.line) } else { f.path.clone() };
+            anstream::println!("{sev} {loc}  {}", ui::dim(&format!("[{}]", f.rule)));
+            anstream::println!("       {}", f.message);
+            if !f.excerpt.is_empty() {
+                anstream::println!("       {}", ui::dim(&f.excerpt));
+            }
+            if !f.advice.is_empty() {
+                anstream::println!("       {} {}", ui::cyan("→"), f.advice);
+            }
+        }
+        anstream::println!(
+            "\n{}",
+            ui::dim(&format!(
+                "Advisory and pattern-based. Silence a rule with `disable = [\"<rule>\"]` in {ANALYZERS_FILE}."
+            ))
+        );
+    }
+    if let Some(t) = threshold
+        && findings.iter().any(|f| f.severity <= t)
+    {
+        return Err(crate::Reported.into());
+    }
+    Ok(())
 }
