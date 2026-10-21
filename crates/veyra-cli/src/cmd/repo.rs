@@ -47,7 +47,10 @@ pub fn clone(
     directory: Option<std::path::PathBuf>,
     scope: Option<String>,
     sparse: Vec<String>,
+    depth: Option<u32>,
+    filter: Option<String>,
 ) -> Result<()> {
+    use veyra_core::remote::Depth;
     let name = directory.unwrap_or_else(|| {
         let trimmed = url.trim_end_matches('/').trim_end_matches(".git");
         std::path::PathBuf::from(trimmed.rsplit(['/', '\\', ':']).next().unwrap_or("repository"))
@@ -59,14 +62,31 @@ pub fn clone(
         (None, false) => Some(veyra_core::sparse::ScopeRequest::Dirs(sparse)),
         (None, true) => None,
     };
-    let repo = match request {
-        Some(req) => {
-            let (repo, dirs) = Repo::clone_scoped(url, &path, req)?;
+    let shallow = depth.map(Depth::Last).unwrap_or(Depth::Unchanged);
+    let repo = match (filter, request) {
+        (Some(f), req) => {
+            veyra_core::promisor::validate_filter(&f)?;
+            let (repo, dirs) = Repo::clone_partial(url, &path, &f, depth, req)?;
+            if repo.is_partial() {
+                anstream::println!("Partial clone ({f}): missing objects are fetched when needed.");
+            } else {
+                ui::warn("the server doesn't support filters, so this is a full clone");
+            }
+            if let Some(d) = dirs {
+                anstream::println!("Sparse checkout of: {}", d.join(", "));
+            }
+            repo
+        }
+        (None, Some(req)) => {
+            let (repo, dirs) = Repo::clone_scoped_with(url, &path, req, shallow)?;
             anstream::println!("Sparse checkout of: {}", dirs.join(", "));
             repo
         }
-        None => Repo::clone_from(url, &path)?,
+        (None, None) => Repo::clone_from_with(url, &path, shallow)?,
     };
+    if depth.is_some() {
+        anstream::println!("Shallow clone: the last {} of history.", plural(depth.unwrap_or(0) as usize, "commit"));
+    }
     let label = repo.head_label().unwrap_or_default();
     anstream::println!("Cloned {url} ({label})");
     Ok(())

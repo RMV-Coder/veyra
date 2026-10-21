@@ -55,9 +55,19 @@ fn list(ctx: &Ctx, repo: &veyra_core::Repo, verbose: bool) -> Result<()> {
 }
 
 pub fn fetch(ctx: &Ctx, remote: Option<String>) -> Result<()> {
+    fetch_with(ctx, remote, None, false)
+}
+
+pub fn fetch_with(ctx: &Ctx, remote: Option<String>, depth: Option<u32>, unshallow: bool) -> Result<()> {
+    use veyra_core::remote::Depth;
     let repo = ctx.repo()?;
+    let depth = match (depth, unshallow) {
+        (Some(n), _) => Depth::Last(n),
+        (None, true) => Depth::Unshallow,
+        (None, false) => Depth::Unchanged,
+    };
     let summary = journal(ctx, &repo, "fetch", false, || {
-        let s = repo.fetch(remote.as_deref())?;
+        let s = repo.fetch_with(remote.as_deref(), depth)?;
         let text = format!("fetch {}: {} ref(s) updated", s.remote, s.updated_refs.len());
         Ok((s, text))
     })?;
@@ -69,6 +79,17 @@ pub fn fetch(ctx: &Ctx, remote: Option<String>) -> Result<()> {
             anstream::println!("  {mode:<12} {}", veyra_core::refs::shorten(name));
         }
     }
+    Ok(())
+}
+
+pub fn backfill(ctx: &Ctx) -> Result<()> {
+    let repo = ctx.repo()?;
+    if !repo.is_partial() {
+        anstream::println!("This isn't a partial clone; every object is already here.");
+        return Ok(());
+    }
+    let n = repo.backfill()?;
+    anstream::println!("Downloaded {} for the current commit.", super::plural(n, "missing object"));
     Ok(())
 }
 

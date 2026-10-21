@@ -48,6 +48,13 @@ pub enum Command {
         /// Check out only these directories (cone-mode sparse checkout).
         #[arg(long, value_name = "dir")]
         sparse: Vec<String>,
+        /// Only the last N commits of history (a shallow clone).
+        #[arg(long, value_name = "N")]
+        depth: Option<u32>,
+        /// Partial clone: leave objects out and fetch them when needed, e.g. `blob:none`,
+        /// `blob:limit=1m`, `tree:0`.
+        #[arg(long, value_name = "SPEC")]
+        filter: Option<String>,
     },
     /// Show the working tree status.
     Status {
@@ -164,7 +171,14 @@ pub enum Command {
     Merge {
         #[command(subcommand)]
         command: Option<MergeCommand>,
-        revision: Option<String>,
+        /// Branches or commits to merge (more than one makes an octopus merge).
+        revisions: Vec<String>,
+        /// Merge strategy: `ort` (default; `recursive` is the same), `ours`, or `subtree`.
+        #[arg(short = 's', long)]
+        strategy: Option<String>,
+        /// Strategy option: `ours` / `theirs` (who wins conflicting hunks), `subtree=<dir>`.
+        #[arg(short = 'X', long = "strategy-option", value_name = "OPTION")]
+        strategy_option: Vec<String>,
         #[arg(long)]
         ff_only: bool,
         #[arg(long)]
@@ -223,7 +237,17 @@ pub enum Command {
     /// Manage remotes.
     Remote(RemoteArgs),
     /// Download objects and refs from a remote.
-    Fetch { remote: Option<String> },
+    Fetch {
+        remote: Option<String>,
+        /// Shallow: only the last N commits of each branch.
+        #[arg(long, value_name = "N", conflicts_with = "unshallow")]
+        depth: Option<u32>,
+        /// Fetch the rest of a shallow repository's history.
+        #[arg(long)]
+        unshallow: bool,
+    },
+    /// Download the objects a partial clone is missing for the current commit (`git backfill`).
+    Backfill,
     /// Fetch and integrate the current branch's upstream.
     Pull {
         remote: Option<String>,
@@ -1445,10 +1469,14 @@ pub enum SparseCommand {
         /// Use a named scope from .veyra/scopes.toml.
         #[arg(long)]
         scope: Option<String>,
+        /// Treat the arguments as gitignore-style patterns (Git's non-cone mode), e.g.
+        /// `'/*' '!/*/' '*.md'`.
+        #[arg(long)]
+        no_cone: bool,
     },
-    /// Add directories to the sparse checkout.
+    /// Add directories (or, in non-cone mode, patterns) to the sparse checkout.
     Add { dirs: Vec<String> },
-    /// Show the selected directories.
+    /// Show the selected directories (or patterns).
     List,
     /// Check out everything again.
     Disable,

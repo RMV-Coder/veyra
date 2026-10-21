@@ -12,6 +12,31 @@ use gix::bstr::ByteSlice;
 
 use crate::Repo;
 
+/// How a fetch or clone treats history depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Depth {
+    /// Keep the shallow boundary where it is (a full repository stays full).
+    Unchanged,
+    /// Have only the last `n` commits of each fetched branch (`--depth n`).
+    Last(u32),
+    /// Fetch the rest of the history (`--unshallow`).
+    Unshallow,
+}
+
+impl Depth {
+    fn shallow(self) -> Result<gix::remote::fetch::Shallow> {
+        use gix::remote::fetch::Shallow;
+        Ok(match self {
+            Depth::Unchanged => Shallow::NoChange,
+            Depth::Last(n) => {
+                Shallow::DepthAtRemote(std::num::NonZeroU32::new(n).context("--depth must be at least 1")?)
+            }
+            // Git's --unshallow is a deepen by the largest possible amount.
+            Depth::Unshallow => Shallow::Deepen(i32::MAX as u32),
+        })
+    }
+}
+
 /// A remote ref: `(name, id, peeled id when it's an annotated tag)`; no id when unborn.
 pub type RemoteRef = (String, Option<ObjectId>, Option<ObjectId>);
 use crate::config;
@@ -75,6 +100,19 @@ impl Repo {
 
     /// Fetch from `remote` (or the default remote) using its configured refspecs.
     pub fn fetch(&self, remote: Option<&str>) -> Result<FetchSummary> {
+        self.fetch_with(remote, Depth::Unchanged)
+    }
+
+    /// Fetch, optionally changing the shallow boundary. In a partial clone the promisor remote
+    /// is fetched with its object filter, so the repository stays partial.
+    pub fn fetch_with(&self, remote: Option<&str>, depth: Depth) -> Result<FetchSummary> {
+        if depth == Depth::Unchanged
+            && let Some(promisor) = self.promisor_remote()
+            && remote.is_none_or(|r| r == promisor)
+        {
+            let updated_refs = self.fetch_partial(&promisor)?;
+            return Ok(FetchSummary { remote: promisor, updated_refs });
+        }
         let remote = match remote {
             Some(name) => self.git.find_remote(name).map_err(|e| anyhow!("no such remote '{name}': {e}"))?,
             None => self
@@ -90,6 +128,7 @@ impl Repo {
         let outcome = connection
             .prepare_fetch(gix::progress::Discard, Default::default())
             .with_context(|| format!("could not negotiate with '{name}'"))?
+            .with_shallow(depth.shallow()?)
             .receive(gix::progress::Discard, &NEVER_INTERRUPT)
             .with_context(|| format!("fetch from '{name}' failed"))?;
         let mut summary = FetchSummary { remote: name, updated_refs: Vec::new() };
@@ -142,11 +181,18 @@ impl Repo {
 
     /// Clone `url` into `path` without checking anything out (no index, empty worktree).
     pub fn clone_from_no_checkout(url: &str, path: &Path) -> Result<Repo> {
+        Self::clone_from_no_checkout_with(url, path, Depth::Unchanged)
+    }
+
+    /// Like [`Repo::clone_from_no_checkout`], optionally shallow.
+    pub fn clone_from_no_checkout_with(url: &str, path: &Path, depth: Depth) -> Result<Repo> {
         if path.exists() && std::fs::read_dir(path).map(|mut d| d.next().is_some()).unwrap_or(false) {
             bail!("destination path '{}' already exists and is not an empty directory", path.display());
         }
         std::fs::create_dir_all(path).with_context(|| format!("could not create {}", path.display()))?;
-        let mut prepare = gix::prepare_clone(url, path).with_context(|| format!("could not prepare clone of {url}"))?;
+        let mut prepare = gix::prepare_clone(url, path)
+            .with_context(|| format!("could not prepare clone of {url}"))?
+            .with_shallow(depth.shallow()?);
         let (repo, _) = prepare
             .fetch_only(gix::progress::Discard, &NEVER_INTERRUPT)
             .with_context(|| format!("could not fetch {url}"))?;
@@ -155,13 +201,20 @@ impl Repo {
 
     /// Clone `url` into `path` and check out the default branch.
     pub fn clone_from(url: &str, path: &Path) -> Result<Repo> {
+        Self::clone_from_with(url, path, Depth::Unchanged)
+    }
+
+    /// Like [`Repo::clone_from`], optionally shallow (`--depth`).
+    pub fn clone_from_with(url: &str, path: &Path, depth: Depth) -> Result<Repo> {
         if path.exists() && std::fs::read_dir(path).map(|mut d| d.next().is_some()).unwrap_or(false) {
             bail!("destination path '{}' already exists and is not an empty directory", path.display());
         }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| format!("could not create {}", parent.display()))?;
         }
-        let mut prepare = gix::prepare_clone(url, path).with_context(|| format!("could not prepare clone of {url}"))?;
+        let mut prepare = gix::prepare_clone(url, path)
+            .with_context(|| format!("could not prepare clone of {url}"))?
+            .with_shallow(depth.shallow()?);
         let (mut checkout, _) = prepare
             .fetch_then_checkout(gix::progress::Discard, &NEVER_INTERRUPT)
             .with_context(|| format!("could not fetch {url}"))?;

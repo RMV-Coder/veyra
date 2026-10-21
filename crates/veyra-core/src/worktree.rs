@@ -544,6 +544,12 @@ impl Repo {
         for (path, _) in changes {
             validate_worktree_path(path.as_ref())?;
         }
+        // Partial clones: fetch the blobs about to be written in one round trip.
+        if self.is_partial() {
+            self.ensure_objects(changes.iter().filter_map(|(p, e)| {
+                e.filter(|e| e.kind != EntryKind::Commit && sparse.is_none_or(|s| s.includes(p.as_ref()))).map(|e| e.id)
+            }))?;
+        }
 
         // 1) Deletions, deepest first.
         let mut deletions: Vec<&BString> = changes.iter().filter(|(_, e)| e.is_none()).map(|(p, _)| p).collect();

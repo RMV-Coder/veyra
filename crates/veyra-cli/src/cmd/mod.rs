@@ -24,7 +24,9 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
     use Command::*;
     match command {
         Init { directory, initial_branch, object_format } => repo::init(ctx, directory, initial_branch, object_format),
-        Clone { url, directory, scope, sparse } => repo::clone(ctx, &url, directory, scope, sparse),
+        Clone { url, directory, scope, sparse, depth, filter } => {
+            repo::clone(ctx, &url, directory, scope, sparse, depth, filter)
+        }
         Status { short } => repo::status(ctx, short),
         Add { paths, patch: true, .. } => repo::add_patch(ctx, paths),
         Add { paths, all, update, force, patch: false } => repo::add(ctx, paths, all, update, force),
@@ -49,8 +51,20 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
         Merge { command: Some(crate::cli::MergeCommand::Resolutions { command }), .. } | Rerere { command } => {
             tools::rerere(ctx, command)
         }
-        Merge { command: None, revision, ff_only, no_ff, message, abort, continue_, assist } => {
-            branch::merge(ctx, revision, ff_only, no_ff, message, abort, continue_, assist)
+        Merge {
+            command: None,
+            revisions,
+            strategy,
+            strategy_option,
+            ff_only,
+            no_ff,
+            message,
+            abort,
+            continue_,
+            assist,
+        } => {
+            let options = branch::merge_options(strategy.as_deref(), &strategy_option, ff_only, no_ff, message)?;
+            branch::merge(ctx, revisions, options, abort, continue_, assist)
         }
         Reset { soft, mixed: _, hard, target, paths } => branch::reset(ctx, soft, hard, target, paths),
         Tag(args) => branch::tag(ctx, args),
@@ -60,7 +74,8 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
             sequence::rebase(ctx, upstream, onto, interactive, continue_, skip, abort)
         }
         Remote(args) => remote::remote(ctx, args),
-        Fetch { remote } => remote::fetch(ctx, remote),
+        Fetch { remote, depth, unshallow } => remote::fetch_with(ctx, remote, depth, unshallow),
+        Backfill => remote::backfill(ctx),
         Pull { remote, branch, ff_only } => remote::pull(ctx, remote, branch, ff_only),
         Push(args) => remote::push(ctx, args),
         Sync { push } => remote::sync(ctx, push),

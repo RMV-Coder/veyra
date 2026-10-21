@@ -1,5 +1,6 @@
 //! Sparse checkout in Git's **cone mode** (`core.sparseCheckout` + `core.sparseCheckoutCone`,
-//! patterns in `.git/info/sparse-checkout`), and `clone --scope` built on it.
+//! patterns in `.git/info/sparse-checkout`), and `clone --scope` built on it. Git's older
+//! **non-cone mode** (arbitrary gitignore-style patterns) is supported too.
 //!
 //! In cone mode a set of directories is selected. Included are: every file at the root, every
 //! file directly inside an ancestor of a selected directory, and everything below a selected
@@ -15,10 +16,112 @@ use serde::Deserialize;
 
 use crate::Repo;
 
-/// The selected cone directories (slash-separated, no leading or trailing slash).
+/// The selected cone directories (slash-separated, no leading or trailing slash), or — in
+/// non-cone mode — the patterns.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Sparse {
     pub dirs: Vec<String>,
+    /// Non-cone mode: gitignore-style patterns, last match wins (`None` in cone mode).
+    pub patterns: Option<Vec<String>>,
+}
+
+/// One gitignore-style pattern (as non-cone sparse checkout uses them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Pattern {
+    glob: Vec<u8>,
+    negated: bool,
+    /// Matches directories only (trailing `/`).
+    dir_only: bool,
+    /// Matched against the whole path (it contains a `/`); otherwise against the last component.
+    anchored: bool,
+}
+
+impl Pattern {
+    fn parse(line: &str) -> Option<Pattern> {
+        let line = line.trim_end_matches([' ', '\r']);
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let (negated, body) = match line.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, line.strip_prefix('\\').unwrap_or(line)),
+        };
+        let (dir_only, body) = match body.strip_suffix('/') {
+            Some(b) => (true, b),
+            None => (false, body),
+        };
+        let anchored = body.contains('/');
+        let glob = body.strip_prefix('/').unwrap_or(body).as_bytes().to_vec();
+        Some(Pattern { glob, negated, dir_only, anchored })
+    }
+
+    /// Does the pattern match `path` (a directory when `is_dir`)?
+    fn matches(&self, path: &str, is_dir: bool) -> bool {
+        if self.dir_only && !is_dir {
+            return false;
+        }
+        if self.anchored {
+            wildmatch(&self.glob, path.as_bytes())
+        } else {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            wildmatch(&self.glob, name.as_bytes())
+        }
+    }
+}
+
+/// Git's wildmatch in pathname mode: `*` and `?` stop at `/`, `**` crosses directories.
+fn wildmatch(p: &[u8], s: &[u8]) -> bool {
+    match p.first() {
+        None => s.is_empty(),
+        Some(b'*') if p.starts_with(b"**") => {
+            let rest = &p[2..];
+            if let Some(after) = rest.strip_prefix(b"/") {
+                // `**/x`: zero or more leading directories.
+                wildmatch(after, s) || s.iter().enumerate().any(|(i, c)| *c == b'/' && wildmatch(after, &s[i + 1..]))
+            } else {
+                (0..=s.len()).any(|i| wildmatch(rest, &s[i..]))
+            }
+        }
+        Some(b'*') => {
+            let rest = &p[1..];
+            for i in 0..=s.len() {
+                if wildmatch(rest, &s[i..]) {
+                    return true;
+                }
+                if i < s.len() && s[i] == b'/' {
+                    return false;
+                }
+            }
+            false
+        }
+        Some(b'?') => !s.is_empty() && s[0] != b'/' && wildmatch(&p[1..], &s[1..]),
+        Some(b'[') => {
+            let Some(&c) = s.first() else { return false };
+            let mut i = 1;
+            let negate = matches!(p.get(1), Some(b'!' | b'^'));
+            if negate {
+                i += 1;
+            }
+            let start = i;
+            let mut hit = false;
+            while i < p.len() && (p[i] != b']' || i == start) {
+                if i + 2 < p.len() && p[i + 1] == b'-' && p[i + 2] != b']' {
+                    hit |= p[i] <= c && c <= p[i + 2];
+                    i += 3;
+                } else {
+                    hit |= p[i] == c;
+                    i += 1;
+                }
+            }
+            if i >= p.len() {
+                // No closing bracket: a literal '['.
+                return c == b'[' && wildmatch(&p[1..], &s[1..]);
+            }
+            hit != negate && c != b'/' && wildmatch(&p[i + 1..], &s[1..])
+        }
+        Some(b'\\') if p.len() > 1 => s.first() == Some(&p[1]) && wildmatch(&p[2..], &s[1..]),
+        Some(c) => s.first() == Some(c) && wildmatch(&p[1..], &s[1..]),
+    }
 }
 
 impl Sparse {
@@ -27,11 +130,25 @@ impl Sparse {
             dirs.iter().map(|d| d.replace('\\', "/").trim_matches('/').to_owned()).filter(|d| !d.is_empty()).collect();
         dirs.sort();
         dirs.dedup();
-        Sparse { dirs }
+        Sparse { dirs, patterns: None }
+    }
+
+    /// Non-cone mode with these patterns (the lines of `.git/info/sparse-checkout`).
+    pub fn non_cone(patterns: &[String]) -> Sparse {
+        let patterns =
+            patterns.iter().map(|p| p.trim_end().to_owned()).filter(|p| Pattern::parse(p).is_some()).collect();
+        Sparse { dirs: Vec::new(), patterns: Some(patterns) }
+    }
+
+    pub fn is_cone(&self) -> bool {
+        self.patterns.is_none()
     }
 
     /// Is `path` (a file) inside the cone?
     pub fn includes(&self, path: &BStr) -> bool {
+        if let Some(lines) = &self.patterns {
+            return Self::pattern_includes(lines, &path.to_str_lossy());
+        }
         let path = path.to_str_lossy();
         let Some(slash) = path.rfind('/') else { return true };
         let dir = &path[..slash];
@@ -40,8 +157,24 @@ impl Sparse {
         })
     }
 
+    /// Non-cone rule: the last pattern matching the file, or one of its directories, decides.
+    fn pattern_includes(lines: &[String], path: &str) -> bool {
+        let mut included = false;
+        let dirs: Vec<&str> = path.match_indices('/').map(|(i, _)| &path[..i]).collect();
+        for pattern in lines.iter().filter_map(|l| Pattern::parse(l)) {
+            let hit = pattern.matches(path, false) || dirs.iter().any(|d| pattern.matches(d, true));
+            if hit {
+                included = !pattern.negated;
+            }
+        }
+        included
+    }
+
     /// The `.git/info/sparse-checkout` content Git writes for this cone.
     pub fn to_patterns(&self) -> String {
+        if let Some(lines) = &self.patterns {
+            return lines.iter().map(|l| format!("{l}\n")).collect();
+        }
         let mut out = String::from("/*\n!/*/\n");
         let mut parents: Vec<String> = Vec::new();
         for d in &self.dirs {
@@ -139,13 +272,10 @@ impl Repo {
             .or_else(|| self.config_bool("core.sparseCheckoutCone"));
         match std::fs::read_to_string(self.sparse_file()) {
             Ok(text) => {
-                // Non-cone patterns are gitignore-style globs with different semantics; reading
-                // them as a cone would check out the wrong files, so refuse instead.
+                // Non-cone patterns are gitignore-style globs with their own semantics.
                 if cone_setting == Some(false) || !is_cone_patterns(&text) {
-                    bail!(
-                        "this repository uses non-cone sparse-checkout patterns, which Veyra doesn't support\n  \
-                         hint: `git sparse-checkout set --cone <dirs>` converts it, or keep using git here"
-                    );
+                    let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+                    return Ok(Some(Sparse::non_cone(&lines)));
                 }
                 Ok(Some(Sparse::from_patterns(&text)))
             }
@@ -155,7 +285,20 @@ impl Repo {
 
     /// Restrict the worktree to `dirs` (cone mode). Returns (files written, files removed).
     pub fn sparse_set(&self, dirs: &[String]) -> Result<(usize, usize)> {
-        let sparse = Sparse::new(dirs);
+        self.sparse_apply(Sparse::new(dirs))
+    }
+
+    /// Restrict the worktree with gitignore-style `patterns` (non-cone mode, like
+    /// `git sparse-checkout set --no-cone`). Returns (files written, files removed).
+    pub fn sparse_set_patterns(&self, patterns: &[String]) -> Result<(usize, usize)> {
+        let sparse = Sparse::non_cone(patterns);
+        if sparse.patterns.as_ref().is_none_or(Vec::is_empty) {
+            bail!("give at least one pattern");
+        }
+        self.sparse_apply(sparse)
+    }
+
+    fn sparse_apply(&self, sparse: Sparse) -> Result<(usize, usize)> {
         let changes = self.worktree_changes()?;
         let dirty: Vec<_> = changes.dirty_tracked().into_iter().filter(|p| !sparse.includes(p.as_ref())).collect();
         if !dirty.is_empty() {
@@ -169,7 +312,11 @@ impl Repo {
         std::fs::write(&file, sparse.to_patterns())?;
         let config = self.config_path(crate::config::Scope::Local)?;
         crate::config::set_in_file(&config, "core.sparseCheckout", "true")?;
-        crate::config::set_in_file(&config, "core.sparseCheckoutCone", "true")?;
+        crate::config::set_in_file(
+            &config,
+            "core.sparseCheckoutCone",
+            if sparse.is_cone() { "true" } else { "false" },
+        )?;
         self.reapply_sparse(Some(&sparse))
     }
 
@@ -204,8 +351,30 @@ impl Repo {
     }
 
     /// Clone `url` into `path`, but check out only the scope's directories (`clone --scope`).
+    /// Write the sparse-checkout file and config for a cone of `dirs` (no worktree changes).
+    pub(crate) fn write_sparse_cone(&self, dirs: &[String]) -> Result<Sparse> {
+        let sparse = Sparse::new(dirs);
+        let file = self.sparse_file();
+        std::fs::create_dir_all(file.parent().expect("has parent"))?;
+        std::fs::write(&file, sparse.to_patterns())?;
+        let config = self.config_path(crate::config::Scope::Local)?;
+        crate::config::set_in_file(&config, "core.sparseCheckout", "true")?;
+        crate::config::set_in_file(&config, "core.sparseCheckoutCone", "true")?;
+        Ok(sparse)
+    }
+
     pub fn clone_scoped(url: &str, path: &Path, dirs_or_scope: ScopeRequest) -> Result<(Repo, Vec<String>)> {
-        let repo = Repo::clone_from_no_checkout(url, path)?;
+        Self::clone_scoped_with(url, path, dirs_or_scope, crate::remote::Depth::Unchanged)
+    }
+
+    /// Like [`Repo::clone_scoped`], optionally shallow.
+    pub fn clone_scoped_with(
+        url: &str,
+        path: &Path,
+        dirs_or_scope: ScopeRequest,
+        depth: crate::remote::Depth,
+    ) -> Result<(Repo, Vec<String>)> {
+        let repo = Repo::clone_from_no_checkout_with(url, path, depth)?;
         let dirs = match dirs_or_scope {
             ScopeRequest::Dirs(d) => d,
             ScopeRequest::Named(name) => {
@@ -218,13 +387,7 @@ impl Repo {
                 scopes.get(&name)?.paths.clone()
             }
         };
-        let sparse = Sparse::new(&dirs);
-        let file = repo.sparse_file();
-        std::fs::create_dir_all(file.parent().expect("has parent"))?;
-        std::fs::write(&file, sparse.to_patterns())?;
-        let config = repo.config_path(crate::config::Scope::Local)?;
-        crate::config::set_in_file(&config, "core.sparseCheckout", "true")?;
-        crate::config::set_in_file(&config, "core.sparseCheckoutCone", "true")?;
+        let sparse = repo.write_sparse_cone(&dirs)?;
         let head = repo.head_commit_id()?.context("the cloned repository has no commits")?;
         let flat = repo.flat_from_commit(head)?;
         let writes: Vec<_> =
@@ -257,6 +420,26 @@ mod tests {
         assert!(is_cone_patterns(&Sparse::new(&["a/b".into(), "c".into()]).to_patterns()));
         assert!(!is_cone_patterns("/*\n!/*/\n*.md\n"));
         assert!(!is_cone_patterns("/src/**/*.rs\n"));
+    }
+
+    #[test]
+    fn non_cone_patterns_follow_gitignore_rules() {
+        let lines: Vec<String> = ["/*", "!/*/", "/docs/", "!/docs/drafts/", "*.md", "!secret.md", "src/**/test_*.rs"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let s = Sparse::non_cone(&lines);
+        let inc = |p: &str| s.includes(p.as_bytes().as_bstr());
+        assert!(inc("README.txt"), "root files");
+        assert!(!inc("lib/x.rs"), "top-level directories are excluded");
+        assert!(inc("docs/guide.txt"));
+        assert!(!inc("docs/drafts/a.txt"));
+        assert!(inc("docs/drafts/notes.md"), "*.md (later) re-includes");
+        assert!(inc("lib/deep/notes.md"), "unanchored patterns match at any depth");
+        assert!(!inc("lib/secret.md"));
+        assert!(inc("src/a/b/test_x.rs"), "** crosses directories");
+        assert!(!inc("src/a/b/x.rs"));
+        assert!(wildmatch(b"a*c", b"abc") && !wildmatch(b"a*c", b"a/c"), "* stays within a directory");
     }
 
     #[test]

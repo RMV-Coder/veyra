@@ -1326,9 +1326,17 @@ pub fn submodule(ctx: &Ctx, command: crate::cli::SubmoduleCommand) -> Result<()>
 
 pub fn sparse(ctx: &Ctx, command: crate::cli::SparseCommand) -> Result<()> {
     use crate::cli::SparseCommand;
+    use veyra_core::sparse::Sparse;
     let repo = ctx.repo()?;
     match command {
-        SparseCommand::Set { dirs, scope } => {
+        SparseCommand::Set { dirs, no_cone: true, .. } => {
+            let (written, removed) = journal(ctx, &repo, "sparse", true, || {
+                let r = repo.sparse_set_patterns(&dirs)?;
+                Ok((r, format!("sparse set --no-cone {}", dirs.join(" "))))
+            })?;
+            anstream::println!("Sparse checkout (patterns): {written} files written, {removed} removed");
+        }
+        SparseCommand::Set { dirs, scope, .. } => {
             let dirs = match scope {
                 Some(name) => {
                     let text = std::fs::read_to_string(repo.workdir()?.join(".veyra/scopes.toml"))
@@ -1346,6 +1354,15 @@ pub fn sparse(ctx: &Ctx, command: crate::cli::SparseCommand) -> Result<()> {
             })?;
             anstream::println!("Sparse checkout: {} ({written} files written, {removed} removed)", dirs.join(", "));
         }
+        SparseCommand::Add { dirs } if repo.sparse()?.is_some_and(|s| !s.is_cone()) => {
+            let mut all = repo.sparse()?.and_then(|s| s.patterns).unwrap_or_default();
+            all.extend(dirs);
+            let (written, _) = journal(ctx, &repo, "sparse", true, || {
+                let r = repo.sparse_set_patterns(&all)?;
+                Ok((r, format!("sparse add (patterns) -> {}", all.join(" "))))
+            })?;
+            anstream::println!("Sparse checkout (patterns): {written} files written");
+        }
         SparseCommand::Add { dirs } => {
             let mut all = repo.sparse()?.map(|s| s.dirs).unwrap_or_default();
             all.extend(dirs);
@@ -1356,6 +1373,7 @@ pub fn sparse(ctx: &Ctx, command: crate::cli::SparseCommand) -> Result<()> {
             anstream::println!("Sparse checkout: {} ({written} files written)", all.join(", "));
         }
         SparseCommand::List => match repo.sparse()? {
+            Some(Sparse { patterns: Some(p), .. }) => p.iter().for_each(|l| anstream::println!("{l}")),
             Some(s) => s.dirs.iter().for_each(|d| anstream::println!("{d}")),
             None => anstream::println!("Sparse checkout is not enabled."),
         },

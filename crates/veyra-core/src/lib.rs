@@ -30,6 +30,7 @@ pub mod objects;
 pub mod patch;
 pub mod patches;
 pub mod pick;
+pub mod promisor;
 pub mod push;
 pub mod refs;
 pub mod release;

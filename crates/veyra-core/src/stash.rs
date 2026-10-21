@@ -242,6 +242,7 @@ impl Repo {
             current: Some("Updated upstream".into()),
             other: Some("Stashed changes".into()),
         };
+        self.ensure_merge_blobs(base_tree, ours, w.tree)?;
         let mut outcome = self
             .git
             .merge_trees(base_tree, ours, w.tree, labels, self.git.tree_merge_options()?)

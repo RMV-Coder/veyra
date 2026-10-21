@@ -323,13 +323,42 @@ pub fn checkout(
     resolve_switch_target(&repo, &target).map(|_| ()).and_then(|_| switch(ctx, Some(target), None, false, force))
 }
 
-#[allow(clippy::too_many_arguments)] // one parameter per `veyra merge` flag
-pub fn merge(
-    ctx: &Ctx,
-    revision: Option<String>,
+/// Turn `-s` / `-X` / `--ff-only` / `--no-ff` / `-m` into merge options.
+pub fn merge_options(
+    strategy: Option<&str>,
+    strategy_options: &[String],
     ff_only: bool,
     no_ff: bool,
     message: Option<String>,
+) -> Result<veyra_core::merge::MergeOptions> {
+    use veyra_core::merge::{Favor, MergeOptions, Strategy};
+    let mut strategy = match strategy {
+        None | Some("ort" | "recursive") => Strategy::ThreeWay,
+        Some("ours") => Strategy::Ours,
+        Some("subtree") => Strategy::Subtree(None),
+        Some(other) => bail!("unknown merge strategy '{other}' (use ort, ours or subtree)"),
+    };
+    let mut favor = None;
+    for o in strategy_options {
+        match o.as_str() {
+            "ours" => favor = Some(Favor::Ours),
+            "theirs" => favor = Some(Favor::Theirs),
+            s if s.starts_with("subtree=") => strategy = Strategy::Subtree(Some(s["subtree=".len()..].to_owned())),
+            "subtree" => strategy = Strategy::Subtree(None),
+            other => bail!("unknown strategy option '{other}' (use ours, theirs or subtree=<dir>)"),
+        }
+    }
+    if strategy == Strategy::Ours && favor.is_some() {
+        bail!("-s ours keeps our tree entirely; -X ours/theirs doesn't apply");
+    }
+    let message = message.map(|m| veyra_core::commit::clean_message(&m, false));
+    Ok(MergeOptions { ff_only, no_ff, message, strategy, favor })
+}
+
+pub fn merge(
+    ctx: &Ctx,
+    revisions: Vec<String>,
+    options: veyra_core::merge::MergeOptions,
     abort: bool,
     continue_: bool,
     assist: bool,
@@ -345,7 +374,7 @@ pub fn merge(
         return super::repo::commit(
             ctx,
             crate::cli::CommitArgs {
-                message: message.into_iter().collect(),
+                message: options.message.into_iter().collect(),
                 file: None,
                 all: false,
                 amend: false,
@@ -364,16 +393,14 @@ pub fn merge(
             },
         );
     }
-    let rev = revision.context("usage: veyra merge <branch> | --abort | --continue")?;
-    let theirs = repo.rev_parse_commit(&rev)?;
+    if revisions.is_empty() {
+        bail!("usage: veyra merge <branch>... | --abort | --continue");
+    }
+    let heads: Vec<(veyra_core::ObjectId, String)> =
+        revisions.iter().map(|r| repo.rev_parse_commit(r).map(|id| (id, r.clone()))).collect::<Result<_>>()?;
+    let rev = revisions.join(", ");
     let outcome = journal(ctx, &repo, "merge", true, || {
-        let outcome = repo.merge(
-            theirs,
-            &rev,
-            ff_only,
-            no_ff,
-            message.clone().map(|m| veyra_core::commit::clean_message(&m, false)),
-        )?;
+        let outcome = repo.merge_with(&heads, &options)?;
         let summary = match &outcome {
             MergeOutcome::AlreadyUpToDate => format!("merge {rev}: already up to date"),
             MergeOutcome::FastForward { to, .. } => format!("merge {rev}: fast-forward to {}", veyra_core::short(to)),

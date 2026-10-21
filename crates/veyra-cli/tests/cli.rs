@@ -2309,3 +2309,264 @@ fn multi_commit_cherry_picks_are_shared_with_git() {
     assert_eq!(env.git(&["rev-parse", "HEAD"]).trim(), main);
     env.assert_git_clean_and_valid();
 }
+
+/// A source repository with history in two directories, served over file:// with filters allowed.
+fn filterable_source(env: &Env) -> (PathBuf, String) {
+    let src = env.home.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    git_in(env, &src, &["init", "-q", "-b", "main"]);
+    git_in(env, &src, &["config", "uploadpack.allowFilter", "true"]);
+    git_in(env, &src, &["config", "uploadpack.allowAnySHA1InWant", "true"]);
+    for i in 1..=4 {
+        std::fs::create_dir_all(src.join("app")).unwrap();
+        std::fs::create_dir_all(src.join("docs")).unwrap();
+        std::fs::write(src.join("app/main.txt"), format!("app {i}\n")).unwrap();
+        std::fs::write(src.join("docs/guide.txt"), format!("docs {i}\n")).unwrap();
+        git_in(env, &src, &["add", "."]);
+        git_in(env, &src, &["commit", "-q", "-m", &format!("c{i}")]);
+    }
+    let url = format!("file://{}", src.to_string_lossy().replace('\\', "/"));
+    (src, url)
+}
+
+/// Is `rev` present locally, without letting Git fetch it on demand?
+fn has_object_locally(env: &Env, dir: &std::path::Path, rev: &str) -> bool {
+    let mut cmd = Command::new("git");
+    env.apply(&mut cmd);
+    cmd.env("GIT_NO_LAZY_FETCH", "1").current_dir(dir).args(["cat-file", "-e", rev]).output().unwrap().status.success()
+}
+
+#[test]
+fn shallow_clones_and_unshallow() {
+    require_git!();
+    let env = Env::new();
+    let (_src, url) = filterable_source(&env);
+    let dest = env.home.join("shallow");
+    let out = env.ok(&["clone", "--depth", "2", &url, dest.to_str().unwrap()]);
+    assert!(out.contains("Shallow clone"), "{out}");
+    assert_eq!(git_in(&env, &dest, &["rev-list", "--count", "HEAD"]).trim(), "2");
+    assert!(dest.join(".git/shallow").exists());
+    let mut log = env.veyra(&["log", "--oneline"]);
+    let log = String::from_utf8_lossy(&log.current_dir(&dest).output().unwrap().stdout).to_string();
+    assert_eq!(log.lines().count(), 2, "{log}");
+    git_in(&env, &dest, &["fsck", "--no-dangling"]);
+
+    let mut unshallow = env.veyra(&["fetch", "--unshallow"]);
+    assert!(unshallow.current_dir(&dest).output().unwrap().status.success());
+    assert_eq!(git_in(&env, &dest, &["rev-list", "--count", "HEAD"]).trim(), "4");
+}
+
+#[test]
+fn partial_clones_fetch_missing_objects_on_demand() {
+    require_git!();
+    let env = Env::new();
+    let (src, url) = filterable_source(&env);
+    let dest = env.home.join("partial");
+    let out = env.ok(&["clone", "--filter=blob:none", &url, dest.to_str().unwrap()]);
+    assert!(out.contains("Partial clone"), "{out}");
+    assert_eq!(git_in(&env, &dest, &["config", "remote.origin.promisor"]).trim(), "true");
+    assert_eq!(std::fs::read_to_string(dest.join("app/main.txt")).unwrap(), "app 4\n");
+    assert!(has_object_locally(&env, &dest, "HEAD:app/main.txt"));
+    assert!(!has_object_locally(&env, &dest, "HEAD~1:app/main.txt"), "older blobs were left out");
+
+    // Veyra fetches what it needs: a diff against the previous commit.
+    let veyra = |args: &[&str]| {
+        let out = env.veyra(args).current_dir(&dest).output().unwrap();
+        assert!(out.status.success(), "veyra {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let diff = veyra(&["diff", "HEAD~1", "HEAD"]);
+    assert!(diff.contains("-app 3") && diff.contains("+app 4"), "{diff}");
+    assert!(has_object_locally(&env, &dest, "HEAD~1:app/main.txt"));
+
+    // Fetching new history keeps the clone partial; backfill downloads what HEAD needs.
+    std::fs::write(src.join("docs/guide.txt"), "docs 5\n").unwrap();
+    git_in(&env, &src, &["commit", "-q", "-am", "c5"]);
+    veyra(&["fetch"]);
+    assert!(!has_object_locally(&env, &dest, "origin/main:docs/guide.txt"), "the filter still applies");
+    veyra(&["pull"]);
+    assert_eq!(std::fs::read_to_string(dest.join("docs/guide.txt")).unwrap(), "docs 5\n");
+    git_in(&env, &dest, &["fsck", "--no-dangling"]);
+    assert_eq!(git_in(&env, &dest, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn partial_and_sparse_clone_downloads_only_the_scope() {
+    require_git!();
+    let env = Env::new();
+    let (_src, url) = filterable_source(&env);
+    let dest = env.home.join("scoped");
+    env.ok(&["clone", "--filter=blob:none", "--sparse", "app", &url, dest.to_str().unwrap()]);
+    assert!(dest.join("app/main.txt").exists());
+    assert!(!dest.join("docs").exists());
+    assert!(has_object_locally(&env, &dest, "HEAD:app/main.txt"));
+    assert!(!has_object_locally(&env, &dest, "HEAD:docs/guide.txt"), "blobs outside the scope stay on the server");
+    // Widening the scope fetches the newly needed blobs.
+    let out = env.veyra(&["sparse", "add", "docs"]).current_dir(&dest).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(std::fs::read_to_string(dest.join("docs/guide.txt")).unwrap(), "docs 4\n");
+}
+
+/// main and topic change the same line of a.txt.
+fn conflicting_branches(env: &Env) {
+    env.commit_file("a.txt", "one\nbase\nthree\n", "base");
+    env.ok(&["switch", "-c", "topic"]);
+    env.commit_file("a.txt", "one\ntopic\nthree\n", "topic");
+    env.ok(&["switch", "main"]);
+    env.commit_file("a.txt", "one\nmain\nthree\n", "main");
+}
+
+#[test]
+fn merge_strategy_ours_and_favour_options() {
+    require_git!();
+    let env = Env::new();
+    conflicting_branches(&env);
+    let main_tree = env.git(&["rev-parse", "HEAD^{tree}"]);
+    env.ok(&["merge", "-s", "ours", "topic"]);
+    assert_eq!(env.git(&["rev-parse", "HEAD^{tree}"]), main_tree, "-s ours keeps our tree");
+    assert_eq!(env.git(&["log", "-1", "--format=%p"]).split_whitespace().count(), 2);
+    env.ok(&["undo"]);
+
+    env.ok(&["merge", "-X", "theirs", "topic"]);
+    assert_eq!(env.read("a.txt").as_deref(), Some("one\ntopic\nthree\n"));
+    env.ok(&["undo"]);
+    env.ok(&["merge", "-X", "ours", "topic"]);
+    assert_eq!(env.read("a.txt").as_deref(), Some("one\nmain\nthree\n"));
+    env.assert_git_clean_and_valid();
+    env.veyra(&["merge", "-s", "frobnicate", "topic"]).assert().failure();
+}
+
+#[test]
+fn octopus_merges_several_branches_or_nothing() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("base.txt", "base\n", "base");
+    for b in ["b1", "b2", "b3"] {
+        env.ok(&["switch", "-c", b, "main"]);
+        env.commit_file(&format!("{b}.txt"), "x\n", b);
+    }
+    env.ok(&["switch", "main"]);
+    let out = env.ok(&["merge", "b1", "b2", "b3"]);
+    assert!(out.contains("Merge"), "{out}");
+    assert_eq!(env.git(&["log", "-1", "--format=%p"]).split_whitespace().count(), 4);
+    assert_eq!(env.git(&["log", "-1", "--format=%s"]).trim(), "Merge branches 'b1', 'b2' and 'b3'");
+    for b in ["b1", "b2", "b3"] {
+        assert!(env.read(&format!("{b}.txt")).is_some());
+    }
+    env.assert_git_clean_and_valid();
+
+    // A conflicting head stops the whole octopus before anything changes.
+    let before = env.git(&["rev-parse", "HEAD"]);
+    for (b, content) in [("c1", "one\n"), ("c2", "two\n")] {
+        env.ok(&["switch", "-c", b, "main"]);
+        env.commit_file("same.txt", content, b);
+    }
+    env.ok(&["switch", "main"]);
+    env.veyra(&["merge", "c1", "c2"]).assert().failure().stderr(predicate::str::contains("octopus"));
+    assert_eq!(env.git(&["rev-parse", "HEAD"]), before);
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn subtree_merges_into_a_directory() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("app.txt", "app\n", "app");
+    // An unrelated project history on branch `lib`.
+    env.git(&["switch", "-q", "--orphan", "lib"]); // empties the index and removes tracked files
+    env.write("lib.txt", "lib 1\n");
+    env.write("util/helper.txt", "help\n");
+    env.git(&["add", "."]);
+    env.git(&["commit", "-q", "-m", "lib 1"]);
+    env.git(&["switch", "-q", "main"]);
+
+    // First merge: named directory (unrelated histories).
+    env.ok(&["merge", "-X", "subtree=vendor/lib", "lib"]);
+    assert_eq!(env.read("vendor/lib/lib.txt").as_deref(), Some("lib 1\n"));
+    assert_eq!(env.read("app.txt").as_deref(), Some("app\n"));
+    assert!(env.read("lib.txt").is_none(), "nothing lands at the top level");
+
+    // Later merges find the directory on their own.
+    env.git(&["switch", "-q", "lib"]);
+    env.write("lib.txt", "lib 2\n");
+    env.git(&["commit", "-q", "-am", "lib 2"]);
+    env.git(&["switch", "-q", "main"]);
+    env.commit_file("app.txt", "app 2\n", "app 2");
+    env.ok(&["merge", "-s", "subtree", "lib"]);
+    assert_eq!(env.read("vendor/lib/lib.txt").as_deref(), Some("lib 2\n"));
+    assert_eq!(env.read("app.txt").as_deref(), Some("app 2\n"));
+    env.assert_git_clean_and_valid();
+}
+
+fn worktree_files(dir: &std::path::Path) -> Vec<String> {
+    fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let e = e.unwrap();
+            let p = e.path();
+            if p.file_name().is_some_and(|n| n == ".git") {
+                continue;
+            }
+            if p.is_dir() {
+                walk(root, &p, out);
+            } else {
+                out.push(p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+#[test]
+fn non_cone_sparse_patterns_agree_with_git() {
+    require_git!();
+    let env = Env::new();
+    for f in [
+        "README.md",
+        "top.txt",
+        "docs/guide.md",
+        "docs/img/logo.png",
+        "docs/drafts/wip.md",
+        "src/a/test_x.rs",
+        "src/a/x.rs",
+        "notes/n.md",
+    ] {
+        env.write(f, "x\n");
+    }
+    env.ok(&["add", "."]);
+    env.ok(&["commit", "-m", "files"]);
+
+    let patterns = ["/*", "!/*/", "/docs/", "!/docs/drafts/", "*.md", "!*.png", "src/**/test_*.rs"];
+    let mut args = vec!["sparse", "set", "--no-cone"];
+    args.extend(patterns);
+    env.ok(&args);
+    let ours = worktree_files(&env.repo);
+    assert_eq!(
+        ours,
+        vec!["README.md", "docs/drafts/wip.md", "docs/guide.md", "notes/n.md", "src/a/test_x.rs", "top.txt"]
+    );
+    assert_eq!(env.git(&["config", "core.sparseCheckoutCone"]).trim(), "false");
+    // Git applying the same patterns changes nothing.
+    env.git(&["sparse-checkout", "reapply"]);
+    assert_eq!(worktree_files(&env.repo), ours);
+    assert_eq!(env.git(&["status", "--porcelain"]), "");
+
+    // Patterns set by Git are honoured by Veyra (checkout of another commit keeps them).
+    let mut gitargs = vec!["sparse-checkout", "set", "--no-cone"];
+    gitargs.extend(["/*", "!/*/", "/src/"]);
+    env.git(&gitargs);
+    let git_view = worktree_files(&env.repo);
+    env.commit_file("src/a/new.rs", "n\n", "more");
+    env.write("docs/guide.md", "changed but hidden\n");
+    assert!(env.ok(&["sparse", "list"]).contains("/src/"));
+    env.ok(&["switch", "-c", "other"]);
+    let mut expected = git_view.clone();
+    expected.push("src/a/new.rs".into());
+    expected.sort();
+    expected.retain(|f| f != "docs/guide.md");
+    let mut now = worktree_files(&env.repo);
+    now.retain(|f| f != "docs/guide.md");
+    assert_eq!(now, expected);
+}

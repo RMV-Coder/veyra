@@ -438,6 +438,7 @@ impl Repo {
             current: Some(head_label.as_bytes().as_bstr()),
             other: Some(their_label.as_bytes().as_bstr()),
         };
+        self.ensure_merge_blobs(base, ours, theirs)?;
         let outcome = self
             .git
             .merge_trees(base, ours, theirs, labels, self.git.tree_merge_options()?)

@@ -225,11 +225,44 @@ impl Repo {
             self.git.write_object(gix::objs::Tree::empty())?;
             return Ok(empty);
         }
-        let mut editor = self.git.edit_tree(ObjectId::empty_tree(self.git.object_hash()))?;
-        for (path, entry) in flat {
-            editor.upsert(path, entry.kind, entry.id).with_context(|| format!("invalid path in tree: {path}"))?;
+        // Built directly rather than with gix's tree editor, which refuses to reference objects
+        // that aren't present locally — normal in a partial clone.
+        enum Node {
+            Leaf(FlatEntry),
+            Dir(BTreeMap<BString, Node>),
         }
-        Ok(editor.write()?.detach())
+        let mut root: BTreeMap<BString, Node> = BTreeMap::new();
+        for (path, entry) in flat {
+            crate::worktree::validate_worktree_path(path.as_ref())
+                .with_context(|| format!("invalid path in tree: {path}"))?;
+            let mut parts = path.split(|b| *b == b'/').peekable();
+            let mut dir = &mut root;
+            while let Some(part) = parts.next() {
+                let name = BString::from(part);
+                if parts.peek().is_none() {
+                    dir.insert(name, Node::Leaf(*entry));
+                    break;
+                }
+                let next = dir.entry(name).or_insert_with(|| Node::Dir(BTreeMap::new()));
+                dir = match next {
+                    Node::Dir(d) => d,
+                    Node::Leaf(_) => anyhow::bail!("{path}: a parent directory is also a file"),
+                };
+            }
+        }
+        fn write(repo: &Repo, dir: &BTreeMap<BString, Node>) -> Result<ObjectId> {
+            let mut entries = Vec::with_capacity(dir.len());
+            for (name, node) in dir {
+                let (mode, oid) = match node {
+                    Node::Leaf(e) => (e.kind.into(), e.id),
+                    Node::Dir(d) => (EntryKind::Tree.into(), write(repo, d)?),
+                };
+                entries.push(gix::objs::tree::Entry { mode, filename: name.clone(), oid });
+            }
+            entries.sort(); // Git's tree order (directories compare as if they ended in '/')
+            Ok(repo.git.write_object(gix::objs::Tree { entries })?.detach())
+        }
+        write(self, &root)
     }
 }
 

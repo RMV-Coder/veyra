@@ -271,8 +271,20 @@ impl Repo {
 
     /// Read a blob's raw (git-internal) content.
     pub fn read_blob(&self, id: ObjectId) -> Result<Vec<u8>> {
-        let blob = self.git.find_blob(id).with_context(|| format!("missing blob {id}"))?;
-        Ok(blob.data.clone())
+        match self.git.find_blob(id) {
+            Ok(blob) => Ok(blob.data.clone()),
+            // A partial clone: fetch the blob from the promisor remote, then read it.
+            Err(_) if self.is_partial() && !self.git.has_object(id) => {
+                self.ensure_objects([id])?;
+                Ok(self
+                    .git
+                    .find_blob(id)
+                    .with_context(|| format!("missing blob {id} (not on the promisor remote either)"))?
+                    .data
+                    .clone())
+            }
+            Err(e) => Err(anyhow::Error::from(e).context(format!("missing blob {id}"))),
+        }
     }
 
     /// Write raw bytes as a blob.

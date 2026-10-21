@@ -9,6 +9,37 @@ use crate::commit::CommitRequest;
 use crate::flat::FlatEntry;
 use crate::semantic::StructuralPass;
 
+/// The merge strategy (`-s`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Strategy {
+    /// The normal three-way merge (Git's `ort` / `recursive`).
+    #[default]
+    ThreeWay,
+    /// Record the merge but keep our tree exactly (`-s ours`).
+    Ours,
+    /// Merge their tree into a subdirectory of ours (`-s subtree`, `-X subtree=<dir>`); the
+    /// directory is found automatically when `None`.
+    Subtree(Option<String>),
+}
+
+/// Which side wins conflicting hunks (`-X ours` / `-X theirs`); non-conflicting changes from
+/// both sides are still merged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Favor {
+    Ours,
+    Theirs,
+}
+
+/// How to merge.
+#[derive(Debug, Clone, Default)]
+pub struct MergeOptions {
+    pub ff_only: bool,
+    pub no_ff: bool,
+    pub message: Option<String>,
+    pub strategy: Strategy,
+    pub favor: Option<Favor>,
+}
+
 /// What a merge did.
 #[derive(Debug, Clone)]
 pub enum MergeOutcome {
@@ -73,10 +104,21 @@ impl Repo {
         no_ff: bool,
         message: Option<String>,
     ) -> Result<MergeOutcome> {
+        let opts = MergeOptions { ff_only, no_ff, message, ..Default::default() };
+        self.merge_with(&[(theirs, label.to_owned())], &opts)
+    }
+
+    /// Merge one or more heads (`label` is how each is named in messages) into the current branch.
+    /// More than one head is an octopus merge.
+    pub fn merge_with(&self, heads: &[(ObjectId, String)], opts: &MergeOptions) -> Result<MergeOutcome> {
         if self.merge_head()?.is_some() {
             bail!(
                 "a merge is already in progress\n  hint: resolve conflicts and `veyra commit`, or `veyra merge --abort`"
             );
+        }
+        let Some((theirs, label)) = heads.first().cloned() else { bail!("nothing to merge") };
+        if heads.len() > 1 {
+            return self.merge_octopus(heads, opts);
         }
         let ours = self.head_commit_id()?;
         let Some(ours) = ours else {
@@ -88,15 +130,24 @@ impl Repo {
         if self.is_ancestor(theirs, ours)? {
             return Ok(MergeOutcome::AlreadyUpToDate);
         }
-        if self.is_ancestor(ours, theirs)? && !no_ff {
+        if self.is_ancestor(ours, theirs)? && !opts.no_ff {
             self.checkout_tree(self.commit_tree_id(theirs)?, false)?;
             self.update_head_target(theirs, Some(ours), &format!("merge {label}: Fast-forward"))?;
             return Ok(MergeOutcome::FastForward { from: Some(ours), to: theirs });
         }
-        if ff_only {
+        if opts.ff_only {
             bail!(
                 "not possible to fast-forward: the branches have diverged\n  hint: run `veyra merge {label}` without --ff-only to create a merge commit"
             );
+        }
+        let summary = opts.message.clone().unwrap_or_else(|| self.merge_summary(std::slice::from_ref(&label)));
+        let ours_tree = self.commit_tree_id(ours)?;
+
+        // `-s ours`: record the merge, keep our tree exactly.
+        if opts.strategy == Strategy::Ours {
+            let commit =
+                self.write_merge_commit(ours_tree, &[ours, theirs], &summary, crate::sign::SignMode::Config)?;
+            return Ok(MergeOutcome::Merged { commit });
         }
 
         let head_label = self.head_label()?;
@@ -105,50 +156,108 @@ impl Repo {
             current: Some(head_label.as_bytes().as_bstr()),
             other: Some(label.as_bytes().as_bstr()),
         };
-        let options: gix::merge::commit::Options = self.git.tree_merge_options()?.into();
+        let tree_options = self.git.tree_merge_options()?.with_file_favor(opts.favor.map(|f| match f {
+            Favor::Ours => gix::merge::tree::FileFavor::Ours,
+            Favor::Theirs => gix::merge::tree::FileFavor::Theirs,
+        }));
+        let base = self.git.merge_base(ours, theirs).ok().flatten().map(|b| b.detach());
+        let base_tree = match base {
+            Some(b) => self.commit_tree_id(b)?,
+            None => self.empty_tree_id(),
+        };
+        let theirs_tree = self.commit_tree_id(theirs)?;
+
+        if let Strategy::Subtree(prefix) = &opts.strategy {
+            // Merge their whole tree into a subdirectory of ours.
+            let prefix = match prefix {
+                Some(p) => p.trim_matches('/').to_owned(),
+                None => self.find_subtree_prefix(ours_tree, theirs_tree)?,
+            };
+            let (base_shifted, theirs_shifted) =
+                (self.shift_tree(base_tree, &prefix)?, self.shift_tree(theirs_tree, &prefix)?);
+            self.ensure_merge_blobs(base_shifted, ours_tree, theirs_shifted)?;
+            let mut outcome = self
+                .git
+                .merge_trees(base_shifted, ours_tree, theirs_shifted, labels, tree_options)
+                .map_err(|e| anyhow!("merge failed: {e}"))?;
+            return self.finish_merge(
+                &mut outcome,
+                [base_shifted, ours_tree, theirs_shifted],
+                ours,
+                theirs,
+                &summary,
+                opts.no_ff,
+            );
+        }
+
+        // Partial clones: fetch the blobs the merge will read, in one round trip.
+        if self.is_partial() {
+            self.ensure_merge_blobs(base_tree, ours_tree, theirs_tree)?;
+        }
+        let options: gix::merge::commit::Options = tree_options.into();
         let mut outcome =
             self.git.merge_commits(ours, theirs, labels, options).map_err(|e| anyhow!("merge failed: {e}"))?;
-        let how = gix::merge::tree::TreatAsUnresolved::git();
-        let unresolved = outcome.tree_merge.has_unresolved_conflicts(how);
-        let merged_tree = outcome.tree_merge.tree.write()?.detach();
+        self.finish_merge(
+            &mut outcome.tree_merge,
+            [base_tree, ours_tree, theirs_tree],
+            ours,
+            theirs,
+            &summary,
+            opts.no_ff,
+        )
+    }
 
-        let summary = message.unwrap_or_else(|| {
-            let current = self.head_state().ok().and_then(|h| h.branch_short().map(str::to_owned));
-            match current {
-                Some(b) if b != "main" && b != "master" => format!("Merge branch '{label}' into {b}\n"),
-                _ => format!("Merge branch '{label}'\n"),
+    /// `Merge branch 'x' [into y]` / `Merge branches 'a', 'b' and 'c'`.
+    fn merge_summary(&self, labels: &[String]) -> String {
+        let current = self.head_state().ok().and_then(|h| h.branch_short().map(str::to_owned));
+        let into = match current {
+            Some(b) if b != "main" && b != "master" => format!(" into {b}"),
+            _ => String::new(),
+        };
+        match labels {
+            [one] => format!("Merge branch '{one}'{into}\n"),
+            many => {
+                let quoted: Vec<String> = many.iter().map(|l| format!("'{l}'")).collect();
+                let (last, rest) = quoted.split_last().expect("at least two");
+                format!("Merge branches {} and {last}{into}\n", rest.join(", "))
             }
-        });
+        }
+    }
 
+    /// Commit a clean merge, or resolve what can be resolved and leave the rest for the user.
+    fn finish_merge(
+        &self,
+        tree_merge: &mut gix::merge::tree::Outcome<'_>,
+        [base_tree, ours_tree, theirs_tree]: [ObjectId; 3],
+        ours: ObjectId,
+        theirs: ObjectId,
+        summary: &str,
+        no_ff: bool,
+    ) -> Result<MergeOutcome> {
+        let how = gix::merge::tree::TreatAsUnresolved::git();
+        let unresolved = tree_merge.has_unresolved_conflicts(how);
+        let merged_tree = tree_merge.tree.write()?.detach();
         if !unresolved {
             self.checkout_tree(merged_tree, false)?;
             let commit =
-                self.write_merge_commit(merged_tree, &[ours, theirs], &summary, crate::sign::SignMode::Config)?;
+                self.write_merge_commit(merged_tree, &[ours, theirs], summary, crate::sign::SignMode::Config)?;
             return Ok(MergeOutcome::Merged { commit });
         }
-
         // Conflicts in supported languages may still merge cleanly symbol by symbol.
-        let base_tree = match self.git.merge_base(ours, theirs).ok().flatten() {
-            Some(base) => self.commit_tree_id(base.detach())?,
-            None => self.empty_tree_id(),
+        let resolved = match self.structural_pass(tree_merge, base_tree, ours_tree, theirs_tree, merged_tree)? {
+            StructuralPass::Clean(tree, trailers) => {
+                self.checkout_tree(tree, false)?;
+                let message = crate::commit::add_trailers(summary, &trailers);
+                let commit = self.write_merge_commit(tree, &[ours, theirs], &message, crate::sign::SignMode::Config)?;
+                return Ok(MergeOutcome::Merged { commit });
+            }
+            StructuralPass::Partial(resolved) => resolved,
         };
-        let (ours_tree, theirs_tree) = (self.commit_tree_id(ours)?, self.commit_tree_id(theirs)?);
-        let resolved =
-            match self.structural_pass(&outcome.tree_merge, base_tree, ours_tree, theirs_tree, merged_tree)? {
-                StructuralPass::Clean(tree, trailers) => {
-                    self.checkout_tree(tree, false)?;
-                    let message = crate::commit::add_trailers(&summary, &trailers);
-                    let commit =
-                        self.write_merge_commit(tree, &[ours, theirs], &message, crate::sign::SignMode::Config)?;
-                    return Ok(MergeOutcome::Merged { commit });
-                }
-                StructuralPass::Partial(resolved) => resolved,
-            };
-        let paths = self.write_conflicted_result(&outcome.tree_merge, merged_tree, &resolved)?;
+        let paths = self.write_conflicted_result(tree_merge, merged_tree, &resolved)?;
 
         let [merge_head, merge_msg, merge_mode] = merge_files(self);
         std::fs::write(&merge_head, format!("{theirs}\n"))?;
-        let mut msg = summary.clone();
+        let mut msg = summary.to_owned();
         msg.push_str("\n# Conflicts:\n");
         for p in &paths {
             msg.push_str(&format!("#\t{p}\n"));
@@ -156,6 +265,114 @@ impl Repo {
         std::fs::write(&merge_msg, msg)?;
         std::fs::write(&merge_mode, if no_ff { "no-ff" } else { "" })?;
         Ok(MergeOutcome::Conflicts { paths })
+    }
+
+    /// An octopus merge: several heads in one commit. Like Git, it refuses to stop for
+    /// conflicts — merge a conflicting head on its own first. Nothing is written until every
+    /// head merged cleanly.
+    fn merge_octopus(&self, heads: &[(ObjectId, String)], opts: &MergeOptions) -> Result<MergeOutcome> {
+        let ours = self.head_commit_id()?.context("cannot make an octopus merge on an unborn branch")?;
+        let mut todo = Vec::new();
+        for (id, label) in heads {
+            if !self.is_ancestor(*id, ours)? && *id != ours && !todo.iter().any(|(t, _)| t == id) {
+                todo.push((*id, label.clone()));
+            }
+        }
+        match todo.len() {
+            0 => return Ok(MergeOutcome::AlreadyUpToDate),
+            1 => return self.merge_with(&todo, opts),
+            _ => {}
+        }
+        if opts.ff_only {
+            bail!("an octopus merge can't be a fast-forward");
+        }
+        let labels: Vec<String> = todo.iter().map(|(_, l)| l.clone()).collect();
+        let summary = opts.message.clone().unwrap_or_else(|| self.merge_summary(&labels));
+        let ours_tree = self.commit_tree_id(ours)?;
+        let mut parents = vec![ours];
+        let tree = if opts.strategy == Strategy::Ours {
+            ours_tree
+        } else {
+            let head_label = self.head_label()?;
+            let mut current = ours_tree;
+            for (id, label) in &todo {
+                let base = self
+                    .git
+                    .merge_base(ours, *id)
+                    .ok()
+                    .flatten()
+                    .with_context(|| format!("'{label}' has no common history with {head_label}"))?
+                    .detach();
+                let (base_tree, theirs_tree) = (self.commit_tree_id(base)?, self.commit_tree_id(*id)?);
+                self.ensure_merge_blobs(base_tree, current, theirs_tree)?;
+                let names = gix::merge::blob::builtin_driver::text::Labels {
+                    ancestor: Some("merge base".into()),
+                    current: Some(head_label.as_bytes().as_bstr()),
+                    other: Some(label.as_bytes().as_bstr()),
+                };
+                let mut outcome = self
+                    .git
+                    .merge_trees(base_tree, current, theirs_tree, names, self.git.tree_merge_options()?)
+                    .map_err(|e| anyhow!("merge failed: {e}"))?;
+                if outcome.has_unresolved_conflicts(gix::merge::tree::TreatAsUnresolved::git()) {
+                    bail!(
+                        "merging '{label}' conflicts, and octopus merges don't stop for conflicts; nothing was changed\n  \
+                         hint: merge '{label}' on its own first, then the others"
+                    );
+                }
+                current = outcome.tree.write()?.detach();
+            }
+            current
+        };
+        parents.extend(todo.iter().map(|(id, _)| *id));
+        if tree != ours_tree {
+            self.checkout_tree(tree, false)?;
+        }
+        let commit = self.write_merge_commit(tree, &parents, &summary, crate::sign::SignMode::Config)?;
+        Ok(MergeOutcome::Merged { commit })
+    }
+
+    /// `tree` with every entry moved under `prefix/`.
+    fn shift_tree(&self, tree: ObjectId, prefix: &str) -> Result<ObjectId> {
+        if prefix.is_empty() {
+            return Ok(tree);
+        }
+        let flat = self.flat_from_tree(tree)?;
+        let shifted: crate::FlatTree =
+            flat.into_iter().map(|(p, e)| (BString::from(format!("{prefix}/{p}")), e)).collect();
+        self.write_flat(&shifted)
+    }
+
+    /// For `-s subtree` without a prefix: the directory of ours whose contents look most like
+    /// the root of theirs.
+    fn find_subtree_prefix(&self, ours: ObjectId, theirs: ObjectId) -> Result<String> {
+        let theirs_flat = self.flat_from_tree(theirs)?;
+        let theirs_files: std::collections::BTreeSet<&BString> = theirs_flat.keys().collect();
+        let ours_flat = self.flat_from_tree(ours)?;
+        let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for p in ours_flat.keys() {
+            let p = p.to_str_lossy();
+            let mut acc = String::new();
+            for part in p.split('/').collect::<Vec<_>>().iter().rev().skip(1).rev() {
+                if !acc.is_empty() {
+                    acc.push('/');
+                }
+                acc.push_str(part);
+                dirs.insert(acc.clone());
+            }
+        }
+        let mut best: Option<(usize, String)> = None;
+        for dir in dirs {
+            let matching =
+                theirs_files.iter().filter(|f| ours_flat.contains_key(&BString::from(format!("{dir}/{f}")))).count();
+            if matching > 0 && best.as_ref().is_none_or(|(n, _)| matching > *n) {
+                best = Some((matching, dir));
+            }
+        }
+        match best {
+            Some((n, dir)) if n * 2 >= theirs_files.len().max(1) => Ok(dir),
+            _ => bail!("couldn't tell which directory to merge into\n  hint: name it with -X subtree=<directory>"),
+        }
     }
 
     /// Write a conflicted merge result like Git does: the merged tree (with conflict markers) goes
