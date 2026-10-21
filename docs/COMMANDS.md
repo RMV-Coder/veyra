@@ -56,7 +56,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git blame [-L a,b]` | `veyra blame <file> [-L a,b] [--rev R] [--json]` | ✅ | Line attribution matches `git blame` |
 | `git reflog` | `veyra op log` | ✅ | Records *every* operation, including staging and uncommitted files |
 | `git shortlog`, `describe`, `grep`, `bisect` | same names | 🗓 2–3 | |
-| — | `veyra diff --semantic / --functions` | 🗓 4 | Tree-sitter |
+| — | `veyra diff --semantic` / `--functions` [`--json`] | ✅ | Functions, methods, classes and types that were added, removed, modified, had their signature changed, were only reformatted, or renamed (renames need a token-identical, non-trivial body). Rust, TypeScript/TSX, JavaScript, Python, Go, Java (Tree-sitter). Other files are listed as unsupported. |
 
 ## Branches
 
@@ -87,7 +87,8 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git rebase <upstream> [--onto X]` | `veyra rebase` | ✅ | Defaults to the branch's upstream. `--continue` / `--skip` / `--abort`. State lives in `.git/veyra/rebase-state`, so plain `git rebase --continue` doesn't know about it. `veyra undo` restores the pre-rebase branch. |
 | `git rebase -i` | `veyra rebase -i <upstream>` | ✅ | `pick`, `reword`, `edit`, `squash`, `fixup`, `drop`, `exec`, `break` (and their one-letter forms), plus reordering. Uses `GIT_SEQUENCE_EDITOR` / `sequence.editor`, then the commit editor. |
 | `git rerere` | `veyra merge resolutions` | 🗓 4 | |
-| — | `veyra merge --semantic / --assist / --explain / --simulate` | 🗓 4–5 | Conservative by default |
+| — | structural merge (automatic in `merge`, `pull`, `cherry-pick`, `revert`, `rebase`, `stash apply/pop`) | ✅ | When Git's line merge conflicts but the two sides changed *different* top-level symbols, Veyra merges the file symbol by symbol. It refuses on syntax errors, same-symbol edits, delete-vs-modify and reorders on both sides, and re-parses the result. Every resolution is printed, and recorded as a `Veyra-Structural-Merge:` trailer. `veyra.structuralMerge` = `true` · `stage` (resolve, then stop for review) · `false`. |
+| — | `veyra merge --assist / --explain / --simulate` | 🗓 5 | |
 
 ## Undo, recovery and checkpoints (Veyra-only)
 
@@ -181,6 +182,7 @@ automated tests, supports it.
 | `veyra.checkpointExclude` | — | Multi-valued globs never snapshotted (beyond `.gitignore`) |
 | `veyra.secretsPolicy` | `block` | `block` · `warn` · `off` for high-confidence findings on commit |
 | `veyra.intentPolicy` | `warn` | `warn` · `block` · `off` for guard violations on commit |
+| `veyra.structuralMerge` | `true` | `true` · `stage` · `false`: resolve conflicts in different symbols automatically, resolve and stop for review, or never |
 
 Committed, shared policy:
 

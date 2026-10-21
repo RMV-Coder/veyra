@@ -9,6 +9,8 @@ use gix::bstr::{BString, ByteSlice};
 /// A Git repository opened through gitoxide.
 pub struct Repo {
     pub(crate) git: gix::Repository,
+    /// Conflicts the last merge/cherry-pick resolved structurally (see `semantic.rs`).
+    pub(crate) structural: std::sync::Mutex<Vec<crate::semantic::StructuralResolution>>,
 }
 
 /// Where `HEAD` points.
@@ -44,13 +46,13 @@ impl Repo {
         let git = gix::discover(start).map_err(|err| {
             anyhow!("not a git repository (or any of the parent directories): {}\n  cause: {err}", start.display())
         })?;
-        Ok(Repo { git })
+        Ok(Repo { git, structural: Default::default() })
     }
 
     /// Open the repository at exactly `path`.
     pub fn open(path: &Path) -> Result<Self> {
         let git = gix::open(path).with_context(|| format!("could not open repository at {}", path.display()))?;
-        Ok(Repo { git })
+        Ok(Repo { git, structural: Default::default() })
     }
 
     /// Initialise a new repository with a worktree at `path`.
@@ -76,7 +78,7 @@ impl Repo {
             .map(|r| r.to_thread_local()),
         }
         .with_context(|| format!("could not initialise repository at {}", path.display()))?;
-        let repo = Repo { git };
+        let repo = Repo { git, structural: Default::default() };
         if let Some(branch) = initial_branch {
             let name = crate::refs::branch_full_name(branch)?;
             repo.set_head_symbolic(&name, "veyra init")?;
@@ -86,7 +88,7 @@ impl Repo {
 
     /// Wrap an already opened gitoxide repository.
     pub fn from_gix(git: gix::Repository) -> Self {
-        Repo { git }
+        Repo { git, structural: Default::default() }
     }
 
     /// Access the underlying gitoxide repository.

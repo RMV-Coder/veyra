@@ -50,6 +50,7 @@ pub fn pick(ctx: &Ctx, kind: PickKind, args: SequenceArgs) -> Result<()> {
             };
             Ok((o, summary))
         })?;
+        super::report_structural(&repo);
         match outcome {
             PickOutcome::Committed(id) => {
                 let info = repo.commit_info(id)?;
@@ -60,6 +61,9 @@ pub fn pick(ctx: &Ctx, kind: PickKind, args: SequenceArgs) -> Result<()> {
             PickOutcome::Conflicts(paths) => {
                 for p in &paths {
                     anstream::println!("CONFLICT (content): merge conflict in {p}");
+                }
+                if paths.is_empty() {
+                    anstream::println!("Every conflict was resolved structurally and staged for review.");
                 }
                 anstream::println!(
                     "{name} of {spec} stopped. Fix the conflicts, `veyra add` them, then `veyra {name} --continue` \
@@ -128,6 +132,7 @@ pub fn rebase(
             Ok((o.clone(), describe(&o)))
         })?
     };
+    super::report_structural(&repo);
     match outcome {
         RebaseOutcome::UpToDate => anstream::println!("Current branch {} is up to date.", repo.head_label()?),
         RebaseOutcome::Done { head, picked, skipped } => {
@@ -168,6 +173,9 @@ pub fn rebase(
             anstream::println!("Could not apply {} {}", veyra_core::short(&commit), info.summary());
             for p in &paths {
                 anstream::println!("CONFLICT (content): merge conflict in {p}");
+            }
+            if paths.is_empty() {
+                anstream::println!("Every conflict was resolved structurally and staged for review.");
             }
             anstream::println!(
                 "Resolve, `veyra add` the files, then `veyra rebase --continue` ({} left). \

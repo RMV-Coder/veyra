@@ -1,0 +1,18 @@
+[package]
+name = "veyra-semantic"
+description = "Syntax-aware diff, structural merge and dependency extraction for Veyra (Tree-sitter)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+regex.workspace = true

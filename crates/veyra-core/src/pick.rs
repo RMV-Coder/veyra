@@ -383,9 +383,9 @@ impl Repo {
             .map_err(|e| anyhow!("could not apply {short}: {e}"))?;
         let mut outcome = outcome;
         let how = gix::merge::tree::TreatAsUnresolved::git();
-        let merged = outcome.tree.write()?.detach();
+        let mut merged = outcome.tree.write()?.detach();
 
-        let message = match kind {
+        let mut message = match kind {
             PickKind::CherryPick => {
                 let mut m = info.message.clone();
                 if options.record_origin {
@@ -396,8 +396,20 @@ impl Repo {
             PickKind::Revert => format!("Revert \"{}\"\n\nThis reverts commit {commit}.\n", info.summary()),
         };
 
-        if outcome.has_unresolved_conflicts(how) {
-            let paths = self.write_conflicted_result(&outcome, merged)?;
+        let mut resolved = Vec::new();
+        let mut conflicted = outcome.has_unresolved_conflicts(how);
+        if conflicted {
+            match self.structural_pass(&outcome, base, ours, theirs, merged)? {
+                crate::semantic::StructuralPass::Clean(tree, trailers) => {
+                    message = crate::commit::add_trailers(&message, &trailers);
+                    merged = tree;
+                    conflicted = false;
+                }
+                crate::semantic::StructuralPass::Partial(r) => resolved = r,
+            }
+        }
+        if conflicted {
+            let paths = self.write_conflicted_result(&outcome, merged, &resolved)?;
             std::fs::write(self.pick_state_path(kind), format!("{commit}\n"))?;
             let mut msg = message.clone();
             msg.push_str("\n# Conflicts:\n");

@@ -6,6 +6,8 @@ use gix::bstr::{BString, ByteSlice};
 
 use crate::Repo;
 use crate::commit::CommitRequest;
+use crate::flat::FlatEntry;
+use crate::semantic::StructuralPass;
 
 /// What a merge did.
 #[derive(Debug, Clone)]
@@ -124,7 +126,24 @@ impl Repo {
             return Ok(MergeOutcome::Merged { commit });
         }
 
-        let paths = self.write_conflicted_result(&outcome.tree_merge, merged_tree)?;
+        // Conflicts in supported languages may still merge cleanly symbol by symbol.
+        let base_tree = match self.git.merge_base(ours, theirs).ok().flatten() {
+            Some(base) => self.commit_tree_id(base.detach())?,
+            None => self.empty_tree_id(),
+        };
+        let (ours_tree, theirs_tree) = (self.commit_tree_id(ours)?, self.commit_tree_id(theirs)?);
+        let resolved =
+            match self.structural_pass(&outcome.tree_merge, base_tree, ours_tree, theirs_tree, merged_tree)? {
+                StructuralPass::Clean(tree, trailers) => {
+                    self.checkout_tree(tree, false)?;
+                    let message = crate::commit::add_trailers(&summary, &trailers);
+                    let commit =
+                        self.write_merge_commit(tree, &[ours, theirs], &message, crate::sign::SignMode::Config)?;
+                    return Ok(MergeOutcome::Merged { commit });
+                }
+                StructuralPass::Partial(resolved) => resolved,
+            };
+        let paths = self.write_conflicted_result(&outcome.tree_merge, merged_tree, &resolved)?;
 
         let [merge_head, merge_msg, merge_mode] = merge_files(self);
         std::fs::write(&merge_head, format!("{theirs}\n"))?;
@@ -140,11 +159,13 @@ impl Repo {
 
     /// Write a conflicted merge result like Git does: the merged tree (with conflict markers) goes
     /// to the worktree, and conflict stages 1–3 go to the index, so `git status`, editors and
-    /// mergetools understand the state. Returns the conflicted paths.
+    /// mergetools understand the state. Files in `resolved` (merged structurally) are written
+    /// and staged as resolved instead. Returns the paths that are still conflicted.
     pub(crate) fn write_conflicted_result(
         &self,
         outcome: &gix::merge::tree::Outcome<'_>,
         merged_tree: ObjectId,
+        resolved: &[(BString, FlatEntry)],
     ) -> Result<Vec<BString>> {
         let how = gix::merge::tree::TreatAsUnresolved::git();
         self.checkout_tree(merged_tree, false)?;
@@ -154,10 +175,32 @@ impl Repo {
             how,
             gix::merge::tree::apply_index_entries::RemovalMode::Prune,
         );
+        if !resolved.is_empty() {
+            let changes: Vec<(BString, Option<FlatEntry>)> =
+                resolved.iter().map(|(p, e)| (p.clone(), Some(*e))).collect();
+            let stats = self.write_worktree(&changes)?;
+            index.remove_entries(|_, path, _| resolved.iter().any(|(p, _)| p.as_bstr() == path));
+            for (path, entry) in resolved {
+                let stat = stats.get(path).copied().unwrap_or_default();
+                index.dangerously_push_entry(
+                    stat,
+                    entry.id,
+                    gix::index::entry::Flags::empty(),
+                    entry.index_mode(),
+                    path.as_ref(),
+                );
+            }
+            index.sort_entries();
+        }
         index.remove_tree();
         index.write(gix::index::write::Options::default())?;
-        let mut paths: Vec<BString> =
-            outcome.conflicts.iter().filter(|c| c.is_unresolved(how)).map(|c| c.ours.location().to_owned()).collect();
+        let mut paths: Vec<BString> = outcome
+            .conflicts
+            .iter()
+            .filter(|c| c.is_unresolved(how))
+            .map(|c| c.ours.location().to_owned())
+            .filter(|p| !resolved.iter().any(|(r, _)| r == p))
+            .collect();
         paths.sort();
         paths.dedup();
         Ok(paths)

@@ -457,6 +457,9 @@ pub struct DiffArgs {
     pub name_status: bool,
     #[arg(short = 'U', long = "unified", default_value_t = 3)]
     pub context: usize,
+    /// Show which functions, methods and types changed (Tree-sitter), not lines.
+    #[arg(long, visible_alias = "functions")]
+    pub semantic: bool,
     #[arg(last = true)]
     pub paths: Vec<String>,
 }

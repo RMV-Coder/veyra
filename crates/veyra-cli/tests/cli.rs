@@ -1356,3 +1356,97 @@ fn attestations_are_git_notes_and_verify() {
             .contains(&env.git(&["rev-parse", "HEAD"]).trim().to_string())
     );
 }
+
+const SEM_BASE: &str = "fn a() -> u32 { 1 }\nfn b() -> u32 { 1 }\n";
+const SEM_MERGED: &str = "fn a() -> u32 { 2 }\nfn b() -> u32 { 3 }\n";
+
+/// Two branches change adjacent functions: Git's line merge conflicts, Veyra merges per symbol.
+fn diverge_on_adjacent_functions(env: &Env) {
+    env.commit_file("lib.rs", SEM_BASE, "base");
+    env.ok(&["switch", "-c", "topic"]);
+    env.commit_file("lib.rs", "fn a() -> u32 { 2 }\nfn b() -> u32 { 1 }\n", "change a");
+    env.ok(&["switch", "main"]);
+    env.commit_file("lib.rs", "fn a() -> u32 { 1 }\nfn b() -> u32 { 3 }\n", "change b");
+}
+
+#[test]
+fn structural_merge_resolves_conflicts_in_different_functions() {
+    require_git!();
+    let env = Env::new();
+    diverge_on_adjacent_functions(&env);
+    let out = env.ok(&["merge", "topic"]);
+    assert!(out.contains("Auto-resolved lib.rs"), "{out}");
+    assert!(out.contains("function a: taken from theirs"), "{out}");
+    assert_eq!(env.read("lib.rs").unwrap(), SEM_MERGED);
+    assert_eq!(env.git(&["log", "-1", "--format=%p"]).split_whitespace().count(), 2);
+    assert!(env.git(&["log", "-1", "--format=%B"]).contains("Veyra-Structural-Merge: lib.rs"));
+    env.assert_git_clean_and_valid();
+
+    // `veyra undo` restores the pre-merge state like any other operation.
+    env.ok(&["undo"]);
+    assert_eq!(env.git(&["log", "-1", "--format=%s"]).trim(), "change b");
+}
+
+#[test]
+fn structural_merge_can_be_disabled_and_leaves_same_symbol_conflicts() {
+    require_git!();
+    let env = Env::new();
+    diverge_on_adjacent_functions(&env);
+    env.ok(&["config", "veyra.structuralMerge", "false"]);
+    env.veyra(&["merge", "topic"]).assert().failure().stdout(predicate::str::contains("CONFLICT"));
+    env.ok(&["merge", "--abort"]);
+
+    // `stage`: resolved and staged, but the merge waits for review.
+    env.ok(&["config", "veyra.structuralMerge", "stage"]);
+    let out = env.ok(&["merge", "topic"]);
+    assert!(out.contains("staged for review"), "{out}");
+    assert_eq!(env.read("lib.rs").unwrap(), SEM_MERGED);
+    assert_eq!(env.git(&["status", "--porcelain"]), "M  lib.rs\n");
+    env.ok(&["commit", "--no-edit"]);
+    assert_eq!(env.git(&["log", "-1", "--format=%p"]).split_whitespace().count(), 2);
+    env.ok(&["undo"]);
+
+    // Both sides change the same function: always a conflict.
+    env.ok(&["config", "veyra.structuralMerge", "true"]);
+    env.ok(&["switch", "-c", "other"]);
+    env.commit_file("lib.rs", "fn a() -> u32 { 7 }\nfn b() -> u32 { 3 }\n", "a=7");
+    env.ok(&["switch", "main"]);
+    env.commit_file("lib.rs", "fn a() -> u32 { 8 }\nfn b() -> u32 { 3 }\n", "a=8");
+    env.veyra(&["merge", "other"]).assert().failure().stdout(predicate::str::contains("CONFLICT"));
+    assert!(env.git(&["status", "--porcelain"]).contains("UU lib.rs"));
+}
+
+#[test]
+fn cherry_pick_uses_structural_merge() {
+    require_git!();
+    let env = Env::new();
+    diverge_on_adjacent_functions(&env);
+    let out = env.ok(&["cherry-pick", "topic"]);
+    assert!(out.contains("Auto-resolved lib.rs"), "{out}");
+    assert_eq!(env.read("lib.rs").unwrap(), SEM_MERGED);
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn semantic_diff_lists_changed_symbols() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file(
+        "lib.rs",
+        "fn keep() {}\nfn old_name(x: u32) -> u32 { x * 2 }\nfn gone() {}\nfn tweak() -> u32 { 1 }\n",
+        "base",
+    );
+    env.write(
+        "lib.rs",
+        "fn keep() {}\nfn new_name(x: u32) -> u32 { x * 2 }\nfn tweak(y: u8) -> u32 { 1 }\nfn fresh() {}\n",
+    );
+    let out = env.ok(&["diff", "--semantic"]);
+    assert!(out.contains("function old_name → new_name"), "{out}");
+    assert!(out.contains("- function gone"), "{out}");
+    assert!(out.contains("+ function fresh"), "{out}");
+    assert!(out.contains("function tweak  signature changed"), "{out}");
+    assert!(!out.contains("keep"), "{out}");
+    let json: serde_json::Value = serde_json::from_str(&env.ok(&["diff", "--functions", "--json"])).unwrap();
+    assert_eq!(json[0]["language"], "Rust");
+    assert_eq!(json[0]["changes"].as_array().unwrap().len(), 4);
+}

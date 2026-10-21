@@ -379,6 +379,7 @@ pub fn merge(
         };
         Ok((outcome, summary))
     })?;
+    super::report_structural(&repo);
     match outcome {
         MergeOutcome::AlreadyUpToDate => anstream::println!("Already up to date."),
         MergeOutcome::FastForward { from, to } => anstream::println!(
@@ -387,6 +388,13 @@ pub fn merge(
             veyra_core::short(&to)
         ),
         MergeOutcome::Merged { commit } => anstream::println!("Merge made: {}", veyra_core::short(&commit)),
+        MergeOutcome::Conflicts { paths } if paths.is_empty() => {
+            anstream::println!(
+                "Every conflict was resolved structurally and staged for review (veyra.structuralMerge=stage).\n\
+                 Check `veyra diff --staged`, then `veyra commit` (or `veyra merge --abort`)."
+            );
+            return Ok(());
+        }
         MergeOutcome::Conflicts { paths } => {
             for p in &paths {
                 anstream::println!("CONFLICT (content): merge conflict in {p}");

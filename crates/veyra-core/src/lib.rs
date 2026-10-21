@@ -28,6 +28,7 @@ pub mod push;
 pub mod refs;
 pub mod remote;
 pub mod repo;
+pub mod semantic;
 pub mod sign;
 pub mod sparse;
 pub mod stash;
@@ -43,6 +44,7 @@ pub use repo::{HeadState, Repo};
 pub use gix;
 pub use gix::ObjectId;
 pub use gix::bstr::{BStr, BString, ByteSlice};
+pub use veyra_semantic as semantic_engine;
 
 /// Short, human-friendly form of an object id (git's default abbreviation length).
 pub fn short(id: &ObjectId) -> String {

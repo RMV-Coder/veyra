@@ -244,8 +244,93 @@ pub fn diff(ctx: &Ctx, args: DiffArgs) -> Result<()> {
     };
     let changes: Vec<PathChange> =
         flat::diff(&old, &new).into_iter().filter(|c| spec.matches(c.path.as_ref())).collect();
+    if args.semantic {
+        return print_semantic(ctx, &repo.semantic_diff_changes(&changes)?);
+    }
     let diffs = repo.diff_changes(&changes, NewSide::Objects, args.context)?;
     print_diffs(&repo, &diffs, args.stat, args.name_only, args.name_status);
+    Ok(())
+}
+
+/// `veyra diff --semantic`: changed symbols per file.
+fn print_semantic(ctx: &Ctx, files: &[veyra_core::semantic::SemanticFileDiff]) -> Result<()> {
+    use veyra_core::semantic_engine::ChangeKind;
+    if ctx.json {
+        let out: Vec<_> = files
+            .iter()
+            .map(|f| match &f.diff {
+                None => json!({"path": f.path.to_string(), "status": f.status.to_string(), "supported": false}),
+                Some(d) => json!({
+                    "path": f.path.to_string(),
+                    "status": f.status.to_string(),
+                    "supported": true,
+                    "language": d.lang.name(),
+                    "parse_errors": d.parse_errors,
+                    "outside_symbols_changed": d.outside_changed,
+                    "formatting_only": d.formatting_only(),
+                    "changes": d.changes.iter().map(|c| json!({
+                        "change": c.change.label(),
+                        "kind": c.kind.label(),
+                        "name": c.name,
+                        "old_name": c.old_name,
+                        "old_line": c.old_line,
+                        "new_line": c.new_line,
+                        "old_signature": c.old_signature,
+                        "new_signature": c.new_signature,
+                    })).collect::<Vec<_>>(),
+                }),
+            })
+            .collect();
+        ui::json(&json!(out));
+        return Ok(());
+    }
+    for f in files {
+        let Some(d) = &f.diff else {
+            anstream::println!(
+                "{} {}  {}",
+                f.status,
+                ui::bold(&f.path.to_string()),
+                ui::dim("(no syntax support; use `veyra diff`)")
+            );
+            continue;
+        };
+        let mut header = format!("{} {}  {}", f.status, ui::bold(&f.path.to_string()), ui::dim(d.lang.name()));
+        if d.formatting_only() && !d.changes.is_empty() {
+            header.push_str(&format!("  {}", ui::dim("formatting only")));
+        }
+        anstream::println!("{header}");
+        if d.parse_errors {
+            anstream::println!("    {}", ui::yellow("! syntax errors in one version; results are best-effort"));
+        }
+        for c in &d.changes {
+            let (mark, colour): (&str, fn(&str) -> String) = match c.change {
+                ChangeKind::Added => ("+", ui::green),
+                ChangeKind::Removed => ("-", ui::red),
+                ChangeKind::Modified { .. } => ("~", ui::yellow),
+                ChangeKind::Reformatted => ("=", ui::dim),
+                ChangeKind::Renamed => (">", ui::cyan),
+            };
+            let what = match (&c.change, &c.old_name) {
+                (ChangeKind::Renamed, Some(old)) => format!("{} {old} → {}", c.kind.label(), c.name),
+                _ => format!("{} {}", c.kind.label(), c.name),
+            };
+            let line = c.new_line.or(c.old_line).map(|l| format!(" (line {l})")).unwrap_or_default();
+            anstream::println!("    {} {}  {}", colour(mark), what, ui::dim(&format!("{}{line}", c.change.label())));
+            if let (ChangeKind::Modified { signature: true }, Some(old), Some(new)) =
+                (&c.change, &c.old_signature, &c.new_signature)
+            {
+                anstream::println!("        {} {}", ui::red("-"), old);
+                anstream::println!("        {} {}", ui::green("+"), new);
+            }
+        }
+        if d.outside_changed {
+            anstream::println!(
+                "    {} {}",
+                ui::yellow("~"),
+                ui::dim("code outside any symbol (imports, top-level statements)")
+            );
+        }
+    }
     Ok(())
 }
 

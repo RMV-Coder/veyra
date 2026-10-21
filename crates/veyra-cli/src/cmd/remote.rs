@@ -95,6 +95,7 @@ pub fn pull(ctx: &Ctx, remote: Option<String>, branch: Option<String>, ff_only: 
         let o = repo.merge(theirs, &label, ff_only, false, None)?;
         Ok((o, format!("pull {label}")))
     })?;
+    super::report_structural(&repo);
     match outcome {
         MergeOutcome::AlreadyUpToDate => anstream::println!("Already up to date."),
         MergeOutcome::FastForward { to, .. } => {

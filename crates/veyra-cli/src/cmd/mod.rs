@@ -128,6 +128,20 @@ pub(crate) fn pathspec(ctx: &Ctx, repo: &Repo, paths: &[String]) -> Result<veyra
     veyra_core::worktree::Pathspec::new(repo, &ctx.cwd, paths)
 }
 
+/// Tell the user about conflicts Veyra resolved symbol by symbol (never silently).
+pub(crate) fn report_structural(repo: &Repo) {
+    for r in repo.take_structural_resolutions() {
+        anstream::println!(
+            "{} {} (structural merge: the sides changed different symbols)",
+            ui::green("Auto-resolved"),
+            r.path
+        );
+        for note in &r.notes {
+            anstream::println!("    {}", ui::dim(note));
+        }
+    }
+}
+
 pub(crate) fn plural(n: usize, word: &str) -> String {
     if n == 1 { format!("{n} {word}") } else { format!("{n} {word}s") }
 }

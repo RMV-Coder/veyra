@@ -246,10 +246,15 @@ impl Repo {
             .git
             .merge_trees(base_tree, ours, w.tree, labels, self.git.tree_merge_options()?)
             .map_err(|e| anyhow!("could not apply the stash: {e}"))?;
-        let merged = outcome.tree.write()?.detach();
+        let mut merged = outcome.tree.write()?.detach();
         if outcome.has_unresolved_conflicts(gix::merge::tree::TreatAsUnresolved::git()) {
-            let paths = self.write_conflicted_result(&outcome, merged)?;
-            return Ok(StashApply::Conflicts(paths));
+            match self.structural_pass(&outcome, base_tree, ours, w.tree, merged)? {
+                crate::semantic::StructuralPass::Clean(tree, _) => merged = tree,
+                crate::semantic::StructuralPass::Partial(resolved) => {
+                    let paths = self.write_conflicted_result(&outcome, merged, &resolved)?;
+                    return Ok(StashApply::Conflicts(paths));
+                }
+            }
         }
         self.checkout_tree(merged, false)?;
         let merged_flat = self.flat_from_tree(merged)?;

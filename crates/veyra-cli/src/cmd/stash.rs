@@ -106,6 +106,7 @@ fn apply(ctx: &Ctx, repo: &veyra_core::Repo, entry: Option<String>, index: bool,
         }
         Ok((outcome, format!("stash {verb} stash@{{{}}}", e.index)))
     })?;
+    super::report_structural(repo);
     match outcome {
         StashApply::Applied { paths } => {
             anstream::println!("Applied stash@{{{}}} ({}): {}", e.index, plural(paths, "path"), e.message);

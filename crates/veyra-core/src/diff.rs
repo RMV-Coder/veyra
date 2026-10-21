@@ -69,7 +69,7 @@ pub fn mode_str(kind: EntryKind) -> &'static str {
 }
 
 impl Repo {
-    fn side_bytes(&self, entry: Option<FlatEntry>, path: &BString, from_worktree: bool) -> Result<Vec<u8>> {
+    pub(crate) fn side_bytes(&self, entry: Option<FlatEntry>, path: &BString, from_worktree: bool) -> Result<Vec<u8>> {
         if from_worktree {
             return Ok(self.read_worktree_as_git(path.as_ref())?.unwrap_or_default());
         }
