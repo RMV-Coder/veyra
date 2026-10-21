@@ -213,3 +213,60 @@ mod tests {
         assert_eq!(m.text, "def f():\n    return 2\n\n\ndef g():\n    return 3\n");
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use proptest::prelude::*;
+
+    fn source(values: &[u8]) -> String {
+        values.iter().enumerate().map(|(i, v)| format!("fn f{i}() -> u32 {{ {v} }}\n")).collect()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Whatever the edits, a successful structural merge contains every side's change and parses.
+        #[test]
+        fn merges_are_complete_and_parse(
+            base in proptest::collection::vec(0u8..9, 1..8),
+            ours_edit in any::<(u8, u8)>(),
+            theirs_edit in any::<(u8, u8)>(),
+        ) {
+            let mut ours = base.clone();
+            let mut theirs = base.clone();
+            let oi = ours_edit.0 as usize % base.len();
+            let ti = theirs_edit.0 as usize % base.len();
+            ours[oi] = 10 + ours_edit.1 % 50;
+            theirs[ti] = 100 + theirs_edit.1 % 50;
+            let (b, o, t) = (source(&base), source(&ours), source(&theirs));
+            match super::structural_merge("x.rs", &b, &o, &t) {
+                Ok(m) => {
+                    prop_assert!(oi != ti, "same-symbol edits must be refused");
+                    let want_ours = format!("fn f{oi}() -> u32 {{ {} }}", ours[oi]);
+                    prop_assert!(m.text.contains(&want_ours));
+                    let want_theirs = format!("fn f{ti}() -> u32 {{ {} }}", theirs[ti]);
+                    prop_assert!(m.text.contains(&want_theirs));
+                    let parsed = crate::parse(crate::Lang::Rust, &m.text).unwrap();
+                    prop_assert!(!parsed.has_errors());
+                }
+                Err(_) => prop_assert!(oi == ti, "disjoint edits should merge"),
+            }
+        }
+
+        #[test]
+        fn a_file_never_differs_from_itself(values in proptest::collection::vec(0u8..200, 0..12)) {
+            let s = source(&values);
+            prop_assert!(crate::semantic_diff("x.rs", &s, &s).unwrap().changes.is_empty());
+        }
+
+        #[test]
+        fn parsing_arbitrary_text_never_panics(text in "\\PC{0,300}") {
+            for lang in [crate::Lang::Rust, crate::Lang::Python, crate::Lang::TypeScript, crate::Lang::Go, crate::Lang::Java] {
+                if let Some(p) = crate::parse(lang, &text) {
+                    let _ = crate::items(&p);
+                    let _ = crate::imports(&p);
+                }
+            }
+        }
+    }
+}

@@ -407,3 +407,15 @@ mod tests {
         assert!(id.starts_with("int-") && id.len() == 10, "{id}");
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn parsing_arbitrary_toml_never_panics(text in "\\PC{0,300}") {
+            let _ = super::Intent::from_toml(&text);
+        }
+    }
+}

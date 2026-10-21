@@ -10,7 +10,7 @@ mod log;
 mod view;
 
 pub use apply::{ApplyConflict, ApplyReport, targets};
-pub use log::{KEEP_REF, OpLog, Operation, Settings, Transaction, new_op_id};
+pub use log::{KEEP_REF, OpLog, Operation, Settings, Transaction, new_op_id, parse_log};
 pub use view::{Captured, HeadView, View, capture, parse_id};
 
 #[cfg(test)]

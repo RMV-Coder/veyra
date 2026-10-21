@@ -1,0 +1,24 @@
+# winget manifest template (singleton format). Replace VERSION and SHA256 from the release's
+# SHA256SUMS, validate with `winget validate`, then submit to microsoft/winget-pkgs.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
+PackageIdentifier: RMV-Coder.Veyra
+PackageVersion: VERSION
+PackageLocale: en-US
+Publisher: Veyra contributors
+PackageName: Veyra
+License: MIT OR Apache-2.0
+ShortDescription: Git-compatible version control with undo, checkpoints and code intelligence
+PackageUrl: https://github.com/RMV-Coder/veyra
+Commands:
+  - veyra
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: veyra-vVERSION-x86_64-pc-windows-msvc\veyra.exe
+        PortableCommandAlias: veyra
+    InstallerUrl: https://github.com/RMV-Coder/veyra/releases/download/vVERSION/veyra-vVERSION-x86_64-pc-windows-msvc.zip
+    InstallerSha256: SHA256_X86_64_WINDOWS
+ManifestType: singleton
+ManifestVersion: 1.6.0

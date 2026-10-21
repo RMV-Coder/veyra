@@ -1,0 +1,50 @@
+[package]
+name = "veyra-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace: fuzzing needs a nightly toolchain and isn't part of `cargo test`.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+veyra-core = { path = "../crates/veyra-core" }
+veyra-ops = { path = "../crates/veyra-ops" }
+veyra-semantic = { path = "../crates/veyra-semantic" }
+veyra-analyze = { path = "../crates/veyra-analyze" }
+veyra-intent = { path = "../crates/veyra-intent" }
+veyra-security = { path = "../crates/veyra-security" }
+
+[[bin]]
+name = "delta_apply"
+path = "fuzz_targets/delta_apply.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "journal"
+path = "fuzz_targets/journal.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "conflict_markers"
+path = "fuzz_targets/conflict_markers.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "semantic"
+path = "fuzz_targets/semantic.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "policy_files"
+path = "fuzz_targets/policy_files.rs"
+test = false
+doc = false

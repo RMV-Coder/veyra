@@ -171,6 +171,7 @@ impl Repo {
         let how = gix::merge::tree::TreatAsUnresolved::git();
         self.checkout_tree(merged_tree, false)?;
         let mut index = self.load_index()?;
+        let mut base_checksum = index.checksum();
         outcome.index_changed_after_applying_conflicts(
             &mut index,
             how,
@@ -205,8 +206,8 @@ impl Repo {
         // Replay resolutions recorded earlier (rerere); remember the new conflicts.
         let staged = self.rerere_replay(&mut index, &paths)?;
         paths.retain(|p| !staged.contains(p));
-        index.remove_tree();
-        index.write(gix::index::write::Options::default())?;
+        let base = std::mem::take(&mut base_checksum);
+        self.write_index_checked(&mut index, base)?;
         Ok(paths)
     }
 

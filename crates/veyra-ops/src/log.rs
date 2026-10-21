@@ -38,6 +38,24 @@ pub struct Operation {
     pub worktree_changes: usize,
 }
 
+/// Parse the journal's JSON-lines text. A torn final line (a crash mid-append) is ignored rather
+/// than poisoning the log; any other bad line is an error.
+pub fn parse_log(text: &str) -> Result<Vec<Operation>> {
+    let total = text.lines().count();
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Operation>(line) {
+            Ok(op) => out.push(op),
+            Err(_) if i + 1 == total && !text.ends_with('\n') => {}
+            Err(err) => bail!("operation log is corrupt at line {}: {err}", i + 1),
+        }
+    }
+    Ok(out)
+}
+
 impl Operation {
     pub fn short_id(&self) -> &str {
         &self.id[..self.id.len().min(8)]
@@ -115,19 +133,7 @@ impl<'r> OpLog<'r> {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(err) => return Err(err).with_context(|| format!("could not read {}", path.display())),
         };
-        let mut out = Vec::new();
-        for (i, line) in text.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<Operation>(line) {
-                Ok(op) => out.push(op),
-                // A torn final line (crash mid-append) is ignored rather than poisoning the log.
-                Err(_) if i + 1 == text.lines().count() => {}
-                Err(err) => bail!("operation log is corrupt at line {}: {err}", i + 1),
-            }
-        }
-        Ok(out)
+        parse_log(&text)
     }
 
     /// Find an operation by id or unique id prefix.
@@ -144,7 +150,9 @@ impl<'r> OpLog<'r> {
     pub(crate) fn lock(&self) -> Result<Lock> {
         std::fs::create_dir_all(&self.dir).with_context(|| format!("could not create {}", self.dir.display()))?;
         let path = self.dir.join("lock");
-        for attempt in 0..50 {
+        // Wait up to ~30 s: Veyra commands queue behind each other rather than failing.
+        const ATTEMPTS: u32 = 300;
+        for attempt in 0..ATTEMPTS {
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut f) => {
                     let _ = writeln!(f, "{}", std::process::id());
@@ -161,13 +169,21 @@ impl<'r> OpLog<'r> {
                         let _ = std::fs::remove_file(&path);
                         continue;
                     }
-                    if attempt == 49 {
+                    if attempt + 1 == ATTEMPTS {
                         bail!(
                             "another Veyra command is running (lock file {} exists)\n  hint: if no Veyra process is running, delete that file",
                             path.display()
                         );
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                // Windows: the previous holder is still deleting the file ("delete pending").
+                Err(err)
+                    if cfg!(windows)
+                        && err.kind() == std::io::ErrorKind::PermissionDenied
+                        && attempt + 1 < ATTEMPTS =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 Err(err) => return Err(err).with_context(|| format!("could not create {}", path.display())),
             }
@@ -283,7 +299,7 @@ impl<'r> OpLog<'r> {
             return Ok(None);
         }
         let summary = message.map(str::to_owned).unwrap_or_else(|| "checkpoint".into());
-        Ok(Some(tx.commit(&summary)?))
+        Ok(Some(tx.commit_unchanged(&summary)?))
     }
 
     /// Take a checkpoint if automatic checkpoints are enabled and something changed.
@@ -511,6 +527,13 @@ impl Transaction<'_, '_> {
     }
 
     /// Capture the `after` view and append the operation.
+    /// Record an operation that changed nothing (a checkpoint): `after` is `before`, so changes
+    /// another program makes while it runs are recorded separately, not absorbed into it.
+    pub fn commit_unchanged(self, summary: &str) -> Result<Operation> {
+        let after = self.before.view.clone();
+        self.record(summary, after)
+    }
+
     pub fn commit(self, summary: &str) -> Result<Operation> {
         let repo = self.log.repo;
         let after = if self.touches_worktree {
@@ -521,6 +544,10 @@ impl Transaction<'_, '_> {
             v.skipped = self.before.view.skipped.clone();
             v
         };
+        self.record(summary, after)
+    }
+
+    fn record(self, summary: &str, after: View) -> Result<Operation> {
         let op = Operation {
             id: new_op_id(),
             time: veyra_core::time::now_seconds(),

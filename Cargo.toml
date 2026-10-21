@@ -1,22 +1,24 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# cargo-fuzz targets build separately with a nightly toolchain (see fuzz/README.md).
+exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.5.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["Veyra contributors"]
 
 [workspace.dependencies]
-veyra-core = { path = "crates/veyra-core", version = "0.5.0" }
-veyra-ops = { path = "crates/veyra-ops", version = "0.5.0" }
-veyra-semantic = { path = "crates/veyra-semantic", version = "0.5.0" }
-veyra-security = { path = "crates/veyra-security", version = "0.5.0" }
-veyra-intent = { path = "crates/veyra-intent", version = "0.5.0" }
-veyra-ai = { path = "crates/veyra-ai", version = "0.5.0" }
-veyra-analyze = { path = "crates/veyra-analyze", version = "0.5.0" }
+veyra-core = { path = "crates/veyra-core", version = "1.0.0" }
+veyra-ops = { path = "crates/veyra-ops", version = "1.0.0" }
+veyra-semantic = { path = "crates/veyra-semantic", version = "1.0.0" }
+veyra-security = { path = "crates/veyra-security", version = "1.0.0" }
+veyra-intent = { path = "crates/veyra-intent", version = "1.0.0" }
+veyra-ai = { path = "crates/veyra-ai", version = "1.0.0" }
+veyra-analyze = { path = "crates/veyra-analyze", version = "1.0.0" }
 
 gix = { version = "0.89", default-features = true }
 anyhow = "1"
@@ -33,6 +35,7 @@ anstyle = "1"
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 # Keep build output small (a full debug build of gitoxide is several GB otherwise).
 [profile.dev]

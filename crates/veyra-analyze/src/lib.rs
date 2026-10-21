@@ -766,3 +766,15 @@ mod tests {
         assert!(Analyzer::from_toml("[[rule]]\nid='x'\npaths=['*']\npattern='('\nmessage='m'\n").is_err());
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn analyzers_never_panic(path in "(db/migrations/x\\.sql|main\\.tf|k8s/a\\.yaml|Dockerfile|\\.github/workflows/c\\.yml|m/migrate/a\\.rb)", old in proptest::option::of("\\PC{0,200}"), new in "\\PC{0,200}") {
+            let _ = super::analyze_file(&super::ChangedFile { path: &path, old: old.as_deref(), new: Some(&new) });
+        }
+    }
+}

@@ -283,3 +283,35 @@ fn a_torn_final_line_from_a_crash_does_not_poison_later_operations() {
     f.log().undo(None, false, false, "veyra undo").unwrap();
     assert_eq!(f.read("a.txt").as_deref(), Some("two"));
 }
+
+mod properties {
+    use proptest::prelude::*;
+
+    /// One genuine journal record, produced once by a real operation.
+    fn real_record() -> &'static str {
+        static LINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        LINE.get_or_init(|| {
+            let f = super::Fixture::new();
+            f.write("a.txt", "x");
+            f.commit_all("first");
+            let text = std::fs::read_to_string(f.repo.veyra_dir().join("oplog.jsonl")).unwrap();
+            text.lines().last().unwrap().to_owned()
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn the_journal_parser_never_panics(text in "\\PC{0,400}") {
+            let _ = crate::parse_log(&text);
+        }
+
+        #[test]
+        fn a_torn_tail_is_always_tolerated(cut in 1usize..400) {
+            let line = real_record();
+            let full = format!("{line}\n");
+            prop_assert_eq!(crate::parse_log(&full).unwrap().len(), 1);
+            let torn = format!("{full}{}", &line[..cut.min(line.len() - 1)]);
+            prop_assert_eq!(crate::parse_log(&torn).unwrap().len(), 1);
+        }
+    }
+}

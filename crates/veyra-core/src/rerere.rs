@@ -350,3 +350,30 @@ mod tests {
         assert_eq!(three_way(pre, post, this).unwrap(), b"new head line\nhead\nAB\ntail\n");
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn normalization_is_idempotent_and_side_order_free(
+            before in "[a-z \n]{0,40}", ours in "[a-z]{1,10}\n", theirs in "[a-z]{1,10}\n", after in "[a-z \n]{0,40}",
+        ) {
+            let before = if before.is_empty() || before.ends_with('\n') { before } else { format!("{before}\n") };
+            let file = format!("{before}<<<<<<< a\n{ours}=======\n{theirs}>>>>>>> b\n{after}");
+            let swapped = format!("{before}<<<<<<< x\n{theirs}=======\n{ours}>>>>>>> y\n{after}");
+            let kind = gix::hash::Kind::Sha1;
+            let n = super::normalize(file.as_bytes(), kind).unwrap();
+            prop_assert_eq!(&super::normalize(swapped.as_bytes(), kind).unwrap().id, &n.id);
+            let again = super::normalize(&n.preimage, kind).unwrap();
+            prop_assert_eq!(again.preimage, n.preimage.clone());
+            prop_assert_eq!(again.id, n.id);
+        }
+
+        #[test]
+        fn arbitrary_text_never_panics(text in proptest::collection::vec(any::<u8>(), 0..2048)) {
+            let _ = super::normalize(&text, gix::hash::Kind::Sha1);
+        }
+    }
+}

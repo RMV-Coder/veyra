@@ -102,9 +102,26 @@ token-identical, non-trivial body, and structural merges refuse anything they ca
 proposals are validated deterministically, and nothing changes history without explicit approval
 (`--yes` in scripts; never for low-confidence merge resolutions).
 
-## Phase 6 — Production hardening → 1.0
+## Phase 6 — Production hardening → 1.0 ✅
 
-- Fuzzing (index, packfile and ref parsing through gix, journal parsing), crash-consistency tests
-  for interrupted writes, and concurrency tests (Veyra and Git running at the same time)
-- Documentation site, installers (winget, Homebrew, cargo), signed release binaries
-- A 1.0 compatibility promise for CLI flags, `--json` schemas and journal format
+- [x] Property tests for every parser and encoder that sees untrusted input (delta, journal,
+      conflict normalization, Tree-sitter analysis, policy files, secret scanning) and cargo-fuzz
+      targets for the same (`fuzz/`). Git's own formats are parsed by gitoxide, fuzzed upstream.
+- [x] Crash consistency: a torn journal record is tolerated and cleaned up on the next write
+- [x] Concurrency: Veyra commands queue on the journal lock; Veyra and Git can run at the same
+      time — index writes are compare-and-swap under Git's `index.lock`, so a concurrent `git add`
+      is never silently lost, and changes Git makes during a checkpoint are journaled separately
+- [x] Release workflow (Linux, macOS, Windows binaries, SHA-256 checksums, build-provenance
+      attestations), install scripts that verify both, Homebrew and winget manifests
+- [x] [COMPATIBILITY.md](COMPATIBILITY.md) and the 1.x [STABILITY.md](STABILITY.md) promise for CLI
+      flags, `--json` output, the journal format and committed policy files
+- [ ] Publish the documentation as a site; submit the Homebrew and winget manifests after the first
+      tagged release
+
+**Exit criterion:** met for 1.0.
+
+## After 1.0
+
+- Partial clone (`--filter=blob:none`) and reftable, as gitoxide adds them
+- Hunk-level `commit --split`; out-of-process analyzer plugins
+- C/C++ grammars for the semantic tools

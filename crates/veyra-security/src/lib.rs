@@ -433,3 +433,19 @@ mod tests {
         assert_eq!(redact("abcdefghijkl"), "abcd…kl");
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn scanning_never_panics_and_never_prints_the_secret(prefix in "\\PC{0,100}", body in "[A-Za-z0-9]{36}") {
+            let scanner = super::Scanner::new(&super::Policy::default()).unwrap();
+            let token = format!("ghp_{body}");
+            for f in scanner.scan("f.txt", &format!("{prefix} {token}\n"), None) {
+                prop_assert!(!f.redacted.contains(&token));
+            }
+        }
+    }
+}

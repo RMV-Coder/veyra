@@ -320,10 +320,11 @@ impl Repo {
                 check_dirty: false,
             });
         let mut iter = platform.into_index_worktree_iter(Vec::<BString>::new())?;
+        let mut refreshed: Vec<(usize, gix::index::entry::Stat)> = Vec::new();
         for item in iter.by_ref() {
             let item = item.map_err(|e| anyhow!("status failed: {e}"))?;
             match item {
-                Item::Modification { rela_path, status, .. } => match status {
+                Item::Modification { rela_path, status, entry_index, .. } => match status {
                     EntryStatus::Conflict { .. } => {
                         conflicted.insert(rela_path);
                     }
@@ -333,7 +334,7 @@ impl Repo {
                     }
                     EntryStatus::Change(Change::SubmoduleModification(_)) => {}
                     EntryStatus::IntentToAdd => out.modified.push(rela_path),
-                    EntryStatus::NeedsUpdate(_) => {}
+                    EntryStatus::NeedsUpdate(stat) => refreshed.push((entry_index, stat)),
                 },
                 Item::DirectoryContents { entry, .. } => {
                     if entry.status == gix::dir::entry::Status::Untracked
@@ -345,10 +346,24 @@ impl Repo {
                 Item::Rewrite { .. } => {}
             }
         }
-        // Persist refreshed stat information like `git status` does, so the next scan is fast.
-        // Failing to write is not fatal: another process may hold the index lock.
-        if let Some(outcome) = iter.outcome_mut() {
-            let _ = outcome.write_changes();
+        // Persist refreshed stat information like `git status` does, so the next scan is fast —
+        // but only onto the exact index the scan read (checked under the lock); it's just a cache.
+        let scanned = iter.outcome_mut().and_then(|o| match &o.worktree_index {
+            gix::worktree::IndexPersistedOrInMemory::Persisted(f) => f.checksum(),
+            _ => None,
+        });
+        if !refreshed.is_empty()
+            && let Some(base) = scanned
+            && let Ok(mut fresh) = self.load_index()
+            && fresh.checksum() == Some(base)
+        {
+            let entries = fresh.entries_mut();
+            if refreshed.iter().all(|(i, _)| *i < entries.len()) {
+                for (i, stat) in refreshed {
+                    entries[i].stat = stat;
+                }
+                let _ = self.write_index_checked(&mut fresh, Some(base));
+            }
         }
         out.conflicted = conflicted.into_iter().collect();
         out.modified.sort();

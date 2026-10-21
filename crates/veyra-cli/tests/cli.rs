@@ -1738,3 +1738,83 @@ fn intent_suggest_keeps_only_guards_that_hold() {
     assert!(list.contains("Charges are idempotent"), "{list}");
     assert!(env.ok(&["intent", "verify"]).contains("All guards of 1 intent hold"));
 }
+
+#[test]
+fn concurrent_veyra_commands_serialize_through_the_journal_lock() {
+    require_git!();
+    let env = std::sync::Arc::new(Env::new());
+    env.commit_file("a.txt", "a\n", "base");
+    let threads: Vec<_> = (0..6)
+        .map(|i| {
+            let env = env.clone();
+            std::thread::spawn(move || {
+                let branch = format!("b{i}");
+                let tag = format!("t{i}");
+                let outs = [
+                    env.veyra(&["branch", "create", &branch]).output().unwrap(),
+                    env.veyra(&["tag", &tag]).output().unwrap(),
+                    env.veyra(&["checkpoint", "-m", &format!("cp {i}")]).output().unwrap(),
+                ];
+                let err: String = outs.iter().map(|o| String::from_utf8_lossy(&o.stderr).to_string()).collect();
+                (outs[0].status.success(), outs[1].status.success(), outs[2].status.success(), err)
+            })
+        })
+        .collect();
+    for t in threads {
+        let (a, b, c, err) = t.join().unwrap();
+        assert!(a && b && c, "every command succeeds (they queue on the lock): {err}");
+    }
+    let branches = env.git(&["branch", "--format=%(refname:short)"]);
+    let tags = env.git(&["tag"]);
+    for i in 0..6 {
+        assert!(branches.contains(&format!("b{i}")), "{branches}");
+        assert!(tags.contains(&format!("t{i}")), "{tags}");
+    }
+    // The journal stayed well-formed: every operation is recorded exactly once.
+    let log: serde_json::Value = serde_json::from_str(&env.ok(&["op", "log", "--json"])).unwrap();
+    let kinds: Vec<&str> = log.as_array().unwrap().iter().filter_map(|o| o["kind"].as_str()).collect();
+    assert_eq!(kinds.iter().filter(|k| **k == "branch").count(), 6, "{kinds:?}");
+    assert_eq!(kinds.iter().filter(|k| **k == "tag").count(), 6, "{kinds:?}");
+    env.git(&["fsck", "--strict", "--no-dangling"]);
+}
+
+#[test]
+fn veyra_and_git_running_at_the_same_time_stay_consistent() {
+    require_git!();
+    let env = std::sync::Arc::new(Env::new());
+    env.commit_file("a.txt", "0\n", "base");
+    let git_env = env.clone();
+    let git = std::thread::spawn(move || {
+        for i in 1..=8 {
+            git_env.write("g.txt", &format!("{i}\n"));
+            git_env.git(&["add", "g.txt"]);
+            git_env.git(&["commit", "-q", "-m", &format!("git {i}")]);
+        }
+    });
+    let mut failures = Vec::new();
+    for _ in 0..8 {
+        for args in [&["status"][..], &["log", "--oneline", "-n", "3"][..], &["checkpoint"][..]] {
+            let out = env.veyra(args).output().unwrap();
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            // A command may lose a race with Git's own index.lock; it must say so, not corrupt anything.
+            if !out.status.success() && !err.contains("lock") {
+                failures.push(format!("veyra {args:?}: {err}"));
+            }
+        }
+    }
+    git.join().unwrap();
+    assert!(failures.is_empty(), "{failures:#?}");
+    assert_eq!(env.git(&["rev-list", "--count", "HEAD"]).trim(), "9");
+    env.git(&["fsck", "--strict", "--no-dangling"]);
+    // Veyra notices what Git did and can still undo it.
+    env.ok(&["status"]);
+    // Undo reverts the most recent outside change (what Git did since Veyra last looked)…
+    let undo = env.ok(&["undo"]);
+    assert!(undo.contains("Undid"), "{undo}");
+    let after_undo: u32 = env.git(&["rev-list", "--count", "HEAD"]).trim().parse().unwrap();
+    assert!(after_undo < 9, "{after_undo}");
+    env.git(&["fsck", "--strict", "--no-dangling"]);
+    // …and redo brings it back.
+    env.ok(&["redo"]);
+    assert_eq!(env.git(&["rev-list", "--count", "HEAD"]).trim(), "9");
+}

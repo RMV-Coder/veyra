@@ -129,6 +129,9 @@ pub fn apply(base: &[u8], delta: &[u8]) -> Option<Vec<u8>> {
         loop {
             let b = *delta.get(*pos)?;
             *pos += 1;
+            if shift >= usize::BITS {
+                return None; // malformed: longer than any real size
+            }
             n |= ((b & 0x7f) as usize) << shift;
             shift += 7;
             if b & 0x80 == 0 {
@@ -141,7 +144,8 @@ pub fn apply(base: &[u8], delta: &[u8]) -> Option<Vec<u8>> {
     if base_len != base.len() {
         return None;
     }
-    let mut out = Vec::with_capacity(result_len);
+    // Don't trust the declared size for the allocation (a corrupt delta could claim terabytes).
+    let mut out = Vec::with_capacity(result_len.min(16 << 20));
     while pos < delta.len() {
         let cmd = delta[pos];
         pos += 1;
@@ -163,7 +167,7 @@ pub fn apply(base: &[u8], delta: &[u8]) -> Option<Vec<u8>> {
             if size == 0 {
                 size = 0x10000;
             }
-            out.extend_from_slice(base.get(offset..offset + size)?);
+            out.extend_from_slice(base.get(offset..offset.checked_add(size)?)?);
         } else if cmd != 0 {
             let n = cmd as usize;
             out.extend_from_slice(delta.get(pos..pos + n)?);
@@ -222,5 +226,49 @@ mod tests {
     #[test]
     fn tiny_inputs_are_not_deltified() {
         assert!(create(b"short", b"short too").is_none());
+    }
+}
+
+#[cfg(test)]
+mod properties {
+    use proptest::prelude::*;
+
+    fn similar_pair() -> impl Strategy<Value = (Vec<u8>, Vec<u8>)> {
+        // A base, and a target made of slices of the base plus fresh bytes.
+        (
+            proptest::collection::vec(any::<u8>(), 0..4096),
+            proptest::collection::vec(
+                (any::<u16>(), any::<u16>(), proptest::collection::vec(any::<u8>(), 0..64)),
+                0..32,
+            ),
+        )
+            .prop_map(|(base, edits)| {
+                let mut target = Vec::new();
+                for (start, len, fresh) in edits {
+                    if !base.is_empty() {
+                        let s = start as usize % base.len();
+                        let e = (s + len as usize % 512).min(base.len());
+                        target.extend_from_slice(&base[s..e]);
+                    }
+                    target.extend_from_slice(&fresh);
+                }
+                (base, target)
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn deltas_round_trip((base, target) in similar_pair()) {
+            if let Some(delta) = super::create(&base, &target) {
+                prop_assert_eq!(super::apply(&base, &delta), Some(target));
+            }
+        }
+
+        #[test]
+        fn applying_garbage_never_panics(base in proptest::collection::vec(any::<u8>(), 0..512), delta in proptest::collection::vec(any::<u8>(), 0..512)) {
+            let _ = super::apply(&base, &delta);
+        }
     }
 }

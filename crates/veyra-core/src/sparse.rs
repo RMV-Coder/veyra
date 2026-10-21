@@ -76,6 +76,17 @@ impl Sparse {
     }
 }
 
+/// Does a sparse-checkout file contain only the pattern shapes Git writes in cone mode?
+fn is_cone_patterns(text: &str) -> bool {
+    let plain = |d: &str| !d.is_empty() && !d.contains(['*', '?', '[', '!', '\\']);
+    text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).all(|l| {
+        l == "/*"
+            || l == "!/*/"
+            || l.strip_prefix('/').and_then(|r| r.strip_suffix('/')).is_some_and(plain)
+            || l.strip_prefix("!/").and_then(|r| r.strip_suffix("/*/")).is_some_and(plain)
+    })
+}
+
 /// `.veyra/scopes.toml`: named sets of directories for `clone --scope` and `sparse set --scope`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Scopes {
@@ -120,8 +131,24 @@ impl Repo {
         if !enabled {
             return Ok(None);
         }
+        let cone_setting = local
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "core.sparsecheckoutcone")
+            .map(|(_, v)| v == "true")
+            .or_else(|| self.config_bool("core.sparseCheckoutCone"));
         match std::fs::read_to_string(self.sparse_file()) {
-            Ok(text) => Ok(Some(Sparse::from_patterns(&text))),
+            Ok(text) => {
+                // Non-cone patterns are gitignore-style globs with different semantics; reading
+                // them as a cone would check out the wrong files, so refuse instead.
+                if cone_setting == Some(false) || !is_cone_patterns(&text) {
+                    bail!(
+                        "this repository uses non-cone sparse-checkout patterns, which Veyra doesn't support\n  \
+                         hint: `git sparse-checkout set --cone <dirs>` converts it, or keep using git here"
+                    );
+                }
+                Ok(Some(Sparse::from_patterns(&text)))
+            }
             Err(_) => Ok(None),
         }
     }
@@ -223,6 +250,13 @@ mod tests {
 
     fn s(dirs: &[&str]) -> Sparse {
         Sparse::new(&dirs.iter().map(|d| d.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn cone_and_non_cone_patterns() {
+        assert!(is_cone_patterns(&Sparse::new(&["a/b".into(), "c".into()]).to_patterns()));
+        assert!(!is_cone_patterns("/*\n!/*/\n*.md\n"));
+        assert!(!is_cone_patterns("/src/**/*.rs\n"));
     }
 
     #[test]

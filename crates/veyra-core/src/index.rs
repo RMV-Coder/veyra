@@ -2,7 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use gix::ObjectId;
 use gix::bstr::{BStr, BString, ByteSlice};
 use gix::index::entry::{Flags, Stat};
 
@@ -29,6 +30,7 @@ impl Repo {
     /// stat information; `fresh_stats` supplies stats for files that were just written.
     pub fn write_index_from_flat(&self, flat: &FlatTree, fresh_stats: &BTreeMap<BString, Stat>) -> Result<()> {
         let old = self.load_index()?;
+        let base = old.checksum();
         let mut old_entries: BTreeMap<&BStr, (&gix::index::Entry, FlatEntry)> = BTreeMap::new();
         for entry in old.entries() {
             if entry.stage_raw() != 0 {
@@ -58,14 +60,38 @@ impl Repo {
             state.dangerously_push_entry(stat, entry.id, flags, entry.index_mode(), path.as_ref());
         }
         state.sort_entries();
-        self.write_index_state(state)
+        let mut file = gix::index::File::from_state(state, self.index_path());
+        self.write_index_checked(&mut file, base)
     }
 
-    /// Write an index state to `.git/index` atomically.
-    pub fn write_index_state(&self, state: gix::index::State) -> Result<()> {
-        let mut file = gix::index::File::from_state(state, self.index_path());
-        file.remove_tree();
-        file.write(gix::index::write::Options::default()).context("could not write the index")?;
+    /// Write `index` to `.git/index` atomically, but only if the file on disk is still the one
+    /// `base` describes (the checksum of the index this was derived from, `None` if there was
+    /// none). Git holds `index.lock` for its whole read-modify-write; Veyra checks the file under
+    /// that same lock instead, so a concurrent `git add` makes Veyra fail loudly rather than
+    /// silently dropping what Git staged.
+    pub fn write_index_checked(&self, index: &mut gix::index::File, base: Option<ObjectId>) -> Result<()> {
+        index.remove_tree();
+        let path = self.index_path();
+        let lock = gix::lock::File::acquire_to_update_resource(
+            &path,
+            gix::lock::acquire::Fail::AfterDurationWithBackoff(std::time::Duration::from_secs(2)),
+            None,
+            0,
+        )
+        .map_err(|e| anyhow!("could not lock the index ({e})\n  hint: another git or veyra command is running"))?;
+        if on_disk_checksum(&path, self.object_hash())? != base.filter(|b| !b.is_null()) {
+            drop(lock);
+            bail!(
+                "the index was changed by another program (e.g. git) while Veyra was working, so nothing was written\n  \
+                 hint: run the command again"
+            );
+        }
+        let mut out = std::io::BufWriter::with_capacity(64 * 1024, lock);
+        index
+            .write_to(&mut out, gix::index::write::Options::default())
+            .map_err(|e| anyhow!("could not write the index: {e}"))?;
+        let lock = out.into_inner().map_err(|e| anyhow!("could not write the index: {}", e.error()))?;
+        lock.commit().map_err(|e| anyhow!("could not replace the index: {e}"))?;
         Ok(())
     }
 
@@ -163,8 +189,8 @@ impl Repo {
         outcome.removed = removals;
         index.sort_entries();
         if !outcome.is_empty() {
-            index.remove_tree();
-            index.write(gix::index::write::Options::default()).context("could not write the index")?;
+            let base = index.checksum();
+            self.write_index_checked(&mut index, base)?;
         }
         Ok(outcome)
     }
@@ -277,5 +303,55 @@ impl Repo {
             flat.insert(new_path, entry);
         }
         self.write_index_from_flat(&flat, &BTreeMap::new())
+    }
+}
+
+/// The checksum trailer of the index file at `path` (`None` if there is no file, or it was written
+/// with `index.skipHash`, which leaves the trailer zeroed).
+fn on_disk_checksum(path: &std::path::Path, kind: gix::hash::Kind) -> Result<Option<ObjectId>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).context("could not read the index"),
+    };
+    let len = kind.len_in_bytes() as u64;
+    if file.metadata()?.len() < len {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::End(-(len as i64)))?;
+    let mut buf = vec![0u8; len as usize];
+    file.read_exact(&mut buf)?;
+    let id = ObjectId::from_bytes_or_panic(&buf);
+    Ok((!id.is_null()).then_some(id))
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use crate::Repo;
+    use crate::worktree::Pathspec;
+
+    #[test]
+    fn index_writes_refuse_to_clobber_a_concurrent_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repo::init(dir.path(), Some("main")).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        repo.add(&Pathspec::all(), false).unwrap();
+
+        // Veyra reads the index…
+        let mut stale = repo.load_index().unwrap();
+        let base = stale.checksum();
+        // …another program stages something in the meantime…
+        std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+        repo.add(&Pathspec::all(), false).unwrap();
+        // …so writing the stale copy back must fail, and b.txt stays staged.
+        let err = repo.write_index_checked(&mut stale, base).unwrap_err().to_string();
+        assert!(err.contains("changed by another program"), "{err}");
+        assert!(repo.flat_index().unwrap().contains_key(&gix::bstr::BString::from("b.txt")));
+
+        // With the current base, the write goes through.
+        let mut fresh = repo.load_index().unwrap();
+        let base = fresh.checksum();
+        repo.write_index_checked(&mut fresh, base).unwrap();
     }
 }

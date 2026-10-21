@@ -273,3 +273,16 @@ mod tests {
         assert!(parse_trailers("subject only\n").is_empty());
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn added_trailers_parse_back(subject in "[A-Za-z][A-Za-z ]{0,30}", key in "[A-Z][a-z]{1,8}(-[A-Z][a-z]{1,8})?", value in "[a-z0-9]{1,20}") {
+            let message = super::add_trailers(&format!("{subject}\n"), &[(key.clone(), value.clone())]);
+            prop_assert!(super::parse_trailers(&message).contains(&(key, value)));
+        }
+    }
+}

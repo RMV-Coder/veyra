@@ -32,6 +32,13 @@ Undid reset 131f50e9 reset --hard to 3c15442
 - **Intents.** Record *why* code exists (`veyra intent create`) along with deterministic guards
   such as "`src/payment/**` must still contain `idempotencyKey`". Veyra warns when a change, made
   by a person or an AI agent, would remove that mechanism.
+- **Code intelligence.** `veyra diff --semantic` lists the functions and types a change touched,
+  conflicts in *different* functions merge on their own (and say so), `veyra impact` shows what a
+  change can affect and which tests to run, with the evidence for each claim, and `veyra analyze`
+  flags risky migrations and infrastructure changes.
+- **Optional AI, off by default.** With the Claude API or a local model: `commit --smart`,
+  `commit --split`, `merge --assist`, `ai review`. Everything is a proposal you approve, payloads
+  are secret-scanned, and `--dry-run` shows exactly what would be sent.
 - **`veyra explain reset --hard`** describes what a Git command does, how risky it is, and how to
   recover.
 - **`veyra doctor`** checks repository health and reports PASS/WARN/FAIL with evidence.
@@ -43,26 +50,35 @@ Command names are Git's (`veyra add`, `veyra commit -m`, `veyra switch -c`, …)
 
 ## Status
 
-**v0.5 — Phases 1–5 of 6 complete.** Everyday local and remote workflows work and are tested
-against real Git: commit, branch, switch, merge, rebase, cherry-pick, revert, stash, clean, blame,
-`log --graph`, clone/fetch/pull/**push**, and Git hooks (husky and lint-staged keep working), plus the
-full safety net, plus `rebase -i`, `add -p`, `branch graph/explain`, delta-compressed pushes,
-signed commits and tags with verification, attestations, worktrees, submodules, sparse checkout and
-`clone --scope`, SHA-256 repositories, and `maintenance` (no `git gc` needed). Phase 4 adds code
-intelligence: `diff --semantic`, structural merges of conflicts in different functions, `impact`
-analysis with evidence, and rerere that shares Git's rr-cache. Phase 5 adds optional AI (off by
-default; Claude API or a local model): `commit --smart/--split`, `merge --assist`, `ai review`, and
-deterministic migration/infrastructure analyzers (`veyra analyze`). See [docs/ROADMAP.md](docs/ROADMAP.md).
+**v1.0 — all six roadmap phases are complete.** Everyday local and remote workflows (commit,
+branch, merge, rebase including `-i`, cherry-pick, revert, stash, blame, clone/fetch/pull/push,
+hooks) are tested against real Git, together with the safety net, signing and attestations,
+worktrees, submodules, sparse checkout, SHA-256 repositories, code intelligence and the optional AI
+layer. What is and isn't supported is listed in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md);
+what stays stable across 1.x is in [docs/STABILITY.md](docs/STABILITY.md). The remaining gaps
+(partial clone, reftable, hunk-level `commit --split`) are tracked in [docs/ROADMAP.md](docs/ROADMAP.md).
 
-## Install from source
+## Install
 
-Requires Rust 1.88+.
+From source (Rust 1.88+):
 
 ```bash
 cargo install --path crates/veyra-cli
 ```
 
-Or build it with `cargo build --release`; the binary is `target/release/veyra`.
+Release binaries for Linux, macOS and Windows are built by the release workflow when a version
+tag is pushed, with SHA-256 checksums and build-provenance attestations. The install scripts
+verify both:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RMV-Coder/veyra/main/install/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/RMV-Coder/veyra/main/install/install.ps1 | iex
+```
+
+Homebrew and winget manifests are in [packaging/](packaging/).
 
 ## Quick start
 
@@ -85,16 +101,20 @@ veyra doctor                            # health report
 
 ```text
 veyra-cli ── veyra-ops (journal, undo, checkpoints)
-         ├── veyra-intent (why-records, guards)        pure, no repository access
-         ├── veyra-security (secret detection)         pure, no repository access
-         └── veyra-core (repository facade) ── gitoxide (gix) ── .git/
+         ├── veyra-intent (why-records, guards)          ┐
+         ├── veyra-security (secret detection)           │ pure: no repository access
+         ├── veyra-analyze (migration / IaC rules)       │
+         ├── veyra-ai (optional providers and prompts)   ┘
+         └── veyra-core (repository facade) ── veyra-semantic (Tree-sitter)
+                                            └── gitoxide (gix) ── .git/
 ```
 
 - **Git's on-disk format is the only format.** Veyra-only state lives in `.git/veyra/` (local) and
   `.veyra/` (committed, reviewable policy).
 - **gitoxide** provides objects, packs, refs, the index, filters, status, merge and fetch. Veyra
   adds porcelain and intelligence on top.
-- **AI is never required.** All Phase 1 features are deterministic and work offline.
+- **AI is never required.** Everything except the `veyra ai` features is deterministic and works
+  offline.
 
 Read [docs/DESIGN.md](docs/DESIGN.md) for the architecture and the reasoning behind each decision,
 and [docs/VISION.md](docs/VISION.md) for the original idea and how each part of it was adopted.
@@ -102,9 +122,12 @@ and [docs/VISION.md](docs/VISION.md) for the original idea and how each part of 
 ## Development
 
 ```bash
-cargo test --workspace     # unit tests + end-to-end tests against real git
+cargo test --workspace     # unit, property and end-to-end tests (against real git)
 cargo clippy --workspace --all-targets
+cargo test --release -p veyra-cli --test perf -- --ignored   # 10k-file performance budgets
 ```
+
+Fuzz targets for the parsers that see untrusted input are in [fuzz/](fuzz/) (cargo-fuzz, nightly).
 
 The end-to-end tests in `crates/veyra-cli/tests/cli.rs` use `git` as the oracle: every repository
 Veyra writes must pass `git fsck --strict` and agree with `git status`, `git log` and `git diff`.
