@@ -32,6 +32,7 @@ pub fn pick(ctx: &Ctx, kind: PickKind, args: SequenceArgs) -> Result<()> {
         })?;
         let info = repo.commit_info(id)?;
         anstream::println!("[{} {}] {}", repo.head_label()?, veyra_core::short(&id), info.summary());
+        super::report_auto_resolutions(&repo);
         return Ok(());
     }
     if args.commits.is_empty() {
@@ -50,7 +51,7 @@ pub fn pick(ctx: &Ctx, kind: PickKind, args: SequenceArgs) -> Result<()> {
             };
             Ok((o, summary))
         })?;
-        super::report_structural(&repo);
+        super::report_auto_resolutions(&repo);
         match outcome {
             PickOutcome::Committed(id) => {
                 let info = repo.commit_info(id)?;
@@ -132,7 +133,7 @@ pub fn rebase(
             Ok((o.clone(), describe(&o)))
         })?
     };
-    super::report_structural(&repo);
+    super::report_auto_resolutions(&repo);
     match outcome {
         RebaseOutcome::UpToDate => anstream::println!("Current branch {} is up to date.", repo.head_label()?),
         RebaseOutcome::Done { head, picked, skipped } => {

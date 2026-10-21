@@ -171,6 +171,21 @@ mod tests {
     }
 
     #[test]
+    fn python_reindent_is_a_real_change() {
+        let old = "def f(x):\n    if x:\n        a()\n    b()\n";
+        let reindented = "def f(x):\n    if x:\n        a()\n        b()\n";
+        assert_eq!(labels("m.py", old, reindented), vec![("f".into(), "modified")]);
+        let spaced = old.replace("f(x)", "f( x )");
+        assert_eq!(semantic_diff("m.py", old, &spaced).unwrap().changes[0].change, ChangeKind::Reformatted);
+    }
+
+    #[test]
+    fn string_contents_are_code() {
+        let (old, new) = ("function f() { return 'a b'; }\n", "function f() { return 'a  b'; }\n");
+        assert_eq!(labels("x.ts", old, new), vec![("f".into(), "modified")]);
+    }
+
+    #[test]
     fn modified_added_removed() {
         let old = "fn a() -> u32 { 1 }\nfn b() {}\n";
         let new = "fn a() -> u32 { 2 }\nfn c(x: u8) { let _ = x; }\n";

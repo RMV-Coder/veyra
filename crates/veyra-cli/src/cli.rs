@@ -160,7 +160,10 @@ pub enum Command {
         paths: Vec<String>,
     },
     /// Join histories together.
+    #[command(args_conflicts_with_subcommands = true)]
     Merge {
+        #[command(subcommand)]
+        command: Option<MergeCommand>,
         revision: Option<String>,
         #[arg(long)]
         ff_only: bool,
@@ -323,8 +326,15 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
+    /// Reuse recorded conflict resolutions (same as `veyra merge resolutions`; Git's rr-cache).
+    Rerere {
+        #[command(subcommand)]
+        command: Option<RerereCommand>,
+    },
     /// Check repository health.
     Doctor,
+    /// What a change can affect: dependents, tests to run, co-changed files and risk, with evidence.
+    Impact(ImpactArgs),
     /// Scan for committed or staged secrets.
     Security(SecurityArgs),
     /// Record and verify *why* code exists.
@@ -462,6 +472,25 @@ pub struct DiffArgs {
     pub semantic: bool,
     #[arg(last = true)]
     pub paths: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ImpactArgs {
+    /// Analyse only the staged changes (default: all uncommitted changes).
+    #[arg(long, alias = "cached")]
+    pub staged: bool,
+    /// Analyse one commit.
+    #[arg(long, value_name = "REV", conflicts_with_all = ["staged", "branch"])]
+    pub commit: Option<String>,
+    /// Analyse the whole branch since it forked from BASE (default: the default branch).
+    #[arg(long, value_name = "BASE", num_args = 0..=1, default_missing_value = "", conflicts_with = "staged")]
+    pub branch: Option<String>,
+    /// Only list the tests to run.
+    #[arg(long)]
+    pub tests: bool,
+    /// How many commits of history to mine for co-changes (0 to skip).
+    #[arg(long, default_value_t = 500)]
+    pub history: usize,
 }
 
 #[derive(Args, Debug)]
@@ -958,6 +987,35 @@ pub enum SubmoduleCommand {
     Add { url: String, path: Option<String> },
     /// Run a shell command in each checked-out submodule.
     Foreach { command: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MergeCommand {
+    /// Recorded conflict resolutions (rerere): replayed automatically when a conflict comes back.
+    Resolutions {
+        #[command(subcommand)]
+        command: Option<RerereCommand>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RerereCommand {
+    /// Show whether it's enabled and the conflicts of the operation in progress (default).
+    Status,
+    /// List every recorded conflict.
+    List,
+    /// Forget the recorded resolution for a conflicted path (or conflict id).
+    Forget { path: String },
+    /// Delete all recorded conflicts and resolutions.
+    Clear,
+    /// Turn on recording and replay (`rerere.enabled=true`, shared with Git).
+    Enable {
+        /// Also stage replayed resolutions (`rerere.autoUpdate=true`).
+        #[arg(long)]
+        auto_stage: bool,
+    },
+    /// Turn it off (`rerere.enabled=false`).
+    Disable,
 }
 
 #[derive(Subcommand, Debug)]

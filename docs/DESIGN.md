@@ -120,6 +120,7 @@ them trivial to unit-test and to reuse in CI tools and editor plugins.
 | `.veyra/secrets.toml` | Secret-scan allowlist and custom rules, committed | Yes |
 | `.veyra/scopes.toml` | Named directory sets for `clone --scope` / `sparse set --scope`, committed | Yes |
 | `refs/notes/veyra/attestations` | in-toto attestations about commits (Git notes) | Push explicitly |
+| `.git/rr-cache/`, `.git/MERGE_RR` | Recorded conflict resolutions — Git's own format, shared with `git rerere` | No |
 | `.git/worktrees/<id>/veyra/`, `refs/veyra/keep-<id>` | A linked worktree's own journal and keep ref | No |
 
 Using Git config for local settings means one configuration system instead of two (there is no

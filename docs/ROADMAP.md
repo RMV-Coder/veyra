@@ -66,16 +66,22 @@ to `git`, and the conformance suite covers every Phase 1–2 command on all thre
 
 **Exit criterion:** met. Signed history verifies in both Git and Veyra, and the 10k-file budgets pass.
 
-## Phase 4 — Code intelligence (deterministic)
+## Phase 4 — Code intelligence (deterministic) ✅
 
-- `diff --semantic / --functions` using Tree-sitter grammars (TypeScript, JavaScript, Python, Rust,
-  Go, Java, C/C++ first). Note: Tree-sitter grammars are C code compiled into the binary.
-- Structural (syntax-aware) merge in Conservative mode, explained and never silently committed
-- `impact [--staged] [--tests]`: import graphs, test mappings, evidence and limitations reported
-- `merge resolutions` (rerere)
+- [x] `diff --semantic` / `--functions` with Tree-sitter (Rust, TypeScript/TSX, JavaScript, Python, Go,
+      Java): added, removed, modified, signature changed, reformatted-only and renamed symbols.
+      The grammars are C code compiled into the binary.
+- [x] Structural merge in conservative mode: conflicts in *different* top-level symbols are merged
+      per symbol, re-parsed and verified; reported on screen and as a `Veyra-Structural-Merge`
+      trailer; `veyra.structuralMerge = stage` stops for review instead of committing
+- [x] `impact [--staged | --commit | --branch] [--tests]`: import resolution per language, name
+      references, test mapping, co-change history, risk with reasons, limitations reported
+- [x] `merge resolutions` (rerere) in Git's rr-cache format
+- [ ] C/C++ grammars
 
-**Exit criterion:** the semantic tools are correct on a curated corpus of real-world changes, and
-false-equivalence claims stay at zero.
+**Exit criterion:** met for the six languages. False-equivalence guards: "reformatted" requires an
+identical token sequence *and* tree shape (so re-indenting Python is a change), renames require a
+token-identical, non-trivial body, and structural merges refuse anything they can't verify.
 
 ## Phase 5 — Optional AI and domain analyzers
 

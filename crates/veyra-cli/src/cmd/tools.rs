@@ -1488,3 +1488,74 @@ pub fn attest(ctx: &Ctx, command: crate::cli::AttestCommand) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn rerere(ctx: &Ctx, command: Option<crate::cli::RerereCommand>) -> Result<()> {
+    use crate::cli::RerereCommand as C;
+    let repo = ctx.repo()?;
+    let config = repo.config_path(veyra_core::config::Scope::Local)?;
+    match command.unwrap_or(C::Status) {
+        C::Status => {
+            let enabled = repo.rerere_enabled();
+            let list = repo.rerere_list()?;
+            let current: Vec<_> = list.iter().filter(|c| c.path.is_some()).collect();
+            if ctx.json {
+                ui::json(&json!({"enabled": enabled, "recorded": list.len(), "current": current}));
+                return Ok(());
+            }
+            anstream::println!(
+                "Recorded resolutions are {} ({} known conflict(s), {} resolved).",
+                if enabled { ui::green("on") } else { ui::yellow("off") },
+                list.len(),
+                list.iter().filter(|c| c.resolved).count()
+            );
+            if !enabled {
+                ui::hint("turn it on with `veyra rerere enable` (shared with `git rerere`)");
+            }
+            for c in current {
+                let state = if c.resolved { "has a recorded resolution" } else { "will be recorded when you conclude" };
+                anstream::println!("  {}  {}", c.path.as_deref().unwrap_or_default(), ui::dim(state));
+            }
+        }
+        C::List => {
+            let list = repo.rerere_list()?;
+            if ctx.json {
+                ui::json(&serde_json::to_value(&list)?);
+                return Ok(());
+            }
+            for c in &list {
+                let state = if c.resolved { ui::green("resolved") } else { ui::dim("conflict only") };
+                let path = c.path.as_deref().map(|p| format!("  ({p})")).unwrap_or_default();
+                anstream::println!("{}  {state}{path}", &c.id[..c.id.len().min(12)]);
+            }
+            if list.is_empty() {
+                anstream::println!("No recorded conflicts.");
+            }
+        }
+        C::Forget { path } => {
+            if repo.rerere_forget(&path)? {
+                anstream::println!("Forgot the recorded resolution for {path}.");
+            } else {
+                bail!("no recorded resolution for '{path}'");
+            }
+        }
+        C::Clear => {
+            let n = repo.rerere_clear()?;
+            anstream::println!("Deleted {}.", plural(n, "recorded conflict"));
+        }
+        C::Enable { auto_stage } => {
+            veyra_core::config::set_in_file(&config, "rerere.enabled", "true")?;
+            if auto_stage {
+                veyra_core::config::set_in_file(&config, "rerere.autoUpdate", "true")?;
+            }
+            anstream::println!(
+                "Recorded resolutions are on{}.",
+                if auto_stage { "; replayed resolutions are staged" } else { "" }
+            );
+        }
+        C::Disable => {
+            veyra_core::config::set_in_file(&config, "rerere.enabled", "false")?;
+            anstream::println!("Recorded resolutions are off (existing recordings are kept).");
+        }
+    }
+    Ok(())
+}

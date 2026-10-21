@@ -27,11 +27,24 @@ pub struct SemanticFileDiff {
     pub diff: Option<veyra_semantic::FileSemanticDiff>,
 }
 
-/// A conflicted file that Veyra merged symbol by symbol.
+/// How Veyra resolved (or remembered) a conflict without the user editing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionMethod {
+    /// Merged symbol by symbol (the sides changed different symbols).
+    Structural,
+    /// A resolution recorded earlier was replayed (`rerere`); `staged` with `rerere.autoUpdate`.
+    Replayed { staged: bool },
+    /// The user's resolution was recorded for next time.
+    Recorded,
+}
+
+/// A conflict Veyra handled automatically. Always reported to the user.
 #[derive(Debug, Clone, Serialize)]
-pub struct StructuralResolution {
+pub struct AutoResolution {
     pub path: String,
-    /// Which symbol came from which side.
+    pub method: ResolutionMethod,
+    /// Details, e.g. which symbol came from which side.
     pub notes: Vec<String>,
 }
 
@@ -99,8 +112,8 @@ impl Repo {
 
     /// The files that merges, cherry-picks, reverts, rebases and stash applications on this
     /// handle resolved structurally since the last call.
-    pub fn take_structural_resolutions(&self) -> Vec<StructuralResolution> {
-        std::mem::take(&mut *self.structural.lock().unwrap_or_else(|e| e.into_inner()))
+    pub fn take_auto_resolutions(&self) -> Vec<AutoResolution> {
+        std::mem::take(&mut *self.auto_resolutions.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Try to resolve the unresolved conflicts of `outcome` symbol by symbol, given the trees
@@ -141,10 +154,10 @@ impl Repo {
             if let Ok(m) = veyra_semantic::structural_merge(&name, bs, os, ts) {
                 let id = self.write_blob(m.text.as_bytes())?;
                 resolved.push((path.clone(), FlatEntry::new(o.kind, id)));
-                notes.push(StructuralResolution { path: name, notes: m.notes });
+                notes.push(AutoResolution { path: name, method: ResolutionMethod::Structural, notes: m.notes });
             }
         }
-        self.structural.lock().unwrap_or_else(|e| e.into_inner()).extend(notes);
+        self.auto_resolutions.lock().unwrap_or_else(|e| e.into_inner()).extend(notes);
         if !resolved.is_empty()
             && resolved.len() == unresolved.len()
             && self.structural_mode() == StructuralMode::Commit

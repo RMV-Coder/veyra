@@ -9,8 +9,9 @@ use gix::bstr::{BString, ByteSlice};
 /// A Git repository opened through gitoxide.
 pub struct Repo {
     pub(crate) git: gix::Repository,
-    /// Conflicts the last merge/cherry-pick resolved structurally (see `semantic.rs`).
-    pub(crate) structural: std::sync::Mutex<Vec<crate::semantic::StructuralResolution>>,
+    /// Conflicts resolved automatically (structurally or from recorded resolutions) since the
+    /// last `take_auto_resolutions` call.
+    pub(crate) auto_resolutions: std::sync::Mutex<Vec<crate::semantic::AutoResolution>>,
 }
 
 /// Where `HEAD` points.
@@ -46,13 +47,13 @@ impl Repo {
         let git = gix::discover(start).map_err(|err| {
             anyhow!("not a git repository (or any of the parent directories): {}\n  cause: {err}", start.display())
         })?;
-        Ok(Repo { git, structural: Default::default() })
+        Ok(Repo { git, auto_resolutions: Default::default() })
     }
 
     /// Open the repository at exactly `path`.
     pub fn open(path: &Path) -> Result<Self> {
         let git = gix::open(path).with_context(|| format!("could not open repository at {}", path.display()))?;
-        Ok(Repo { git, structural: Default::default() })
+        Ok(Repo { git, auto_resolutions: Default::default() })
     }
 
     /// Initialise a new repository with a worktree at `path`.
@@ -78,7 +79,7 @@ impl Repo {
             .map(|r| r.to_thread_local()),
         }
         .with_context(|| format!("could not initialise repository at {}", path.display()))?;
-        let repo = Repo { git, structural: Default::default() };
+        let repo = Repo { git, auto_resolutions: Default::default() };
         if let Some(branch) = initial_branch {
             let name = crate::refs::branch_full_name(branch)?;
             repo.set_head_symbolic(&name, "veyra init")?;
@@ -88,7 +89,7 @@ impl Repo {
 
     /// Wrap an already opened gitoxide repository.
     pub fn from_gix(git: gix::Repository) -> Self {
-        Repo { git, structural: Default::default() }
+        Repo { git, auto_resolutions: Default::default() }
     }
 
     /// Access the underlying gitoxide repository.

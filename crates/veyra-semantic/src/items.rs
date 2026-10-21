@@ -189,7 +189,9 @@ fn tokens<'s>(node: Node<'_>, source: &'s str, out: &mut Vec<&'s str>) {
     tokens_except(node, source, &[], out);
 }
 
-/// Leaf tokens of `node`, without comments and without the nodes covering `skip` ranges.
+/// Leaf tokens of `node`, without comments and without the nodes covering `skip` ranges. The
+/// tree's shape is included too (named node kinds as brackets): in indentation-sensitive
+/// languages such as Python, re-indenting a line keeps the leaf tokens but changes the meaning.
 fn tokens_except<'s>(node: Node<'_>, source: &'s str, skip: &[Range<usize>], out: &mut Vec<&'s str>) {
     if node.kind().contains("comment") || skip.iter().any(|r| *r == node.byte_range()) {
         return;
@@ -202,10 +204,28 @@ fn tokens_except<'s>(node: Node<'_>, source: &'s str, skip: &[Range<usize>], out
         }
         return;
     }
+    if node.is_named() {
+        out.push(node.kind());
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         tokens_except(child, source, skip, out);
     }
+    if node.is_named() {
+        out.push("\u{1}");
+    }
+}
+
+/// Number of non-comment leaf tokens below `node`.
+fn leaf_count(node: Node<'_>) -> usize {
+    if node.kind().contains("comment") {
+        return 0;
+    }
+    if node.child_count() == 0 {
+        return 1;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor).map(leaf_count).sum()
 }
 
 /// Leaf tokens of the whole file outside the given (top-level item) ranges.
@@ -329,7 +349,7 @@ fn walk(parsed: &Parsed, node: Node<'_>, container: Option<&str>, top: bool, out
             out.push(Item {
                 end_line: child.end_position().row + 1,
                 own_hash: token_hash,
-                token_count: toks.len(),
+                token_count: leaf_count(child),
                 ordinal: 0,
                 kind,
                 name: name.clone(),

@@ -327,7 +327,9 @@ impl OpLog<'_> {
             .iter()
             .rev()
             .find(|op| {
-                op.after.merge_head.as_deref() == Some(merge_head.to_string().as_str())
+                // An undo/redo can re-enter a stopped merge; the merge itself started earlier.
+                !matches!(op.kind.as_str(), "undo" | "redo")
+                    && op.after.merge_head.as_deref() == Some(merge_head.to_string().as_str())
                     && op.before.merge_head.is_none()
             })
             .cloned();

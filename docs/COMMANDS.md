@@ -86,7 +86,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git revert [-n] [-m N]` | `veyra revert` | ✅ | The safe way to reverse pushed commits. `--continue` / `--abort`. |
 | `git rebase <upstream> [--onto X]` | `veyra rebase` | ✅ | Defaults to the branch's upstream. `--continue` / `--skip` / `--abort`. State lives in `.git/veyra/rebase-state`, so plain `git rebase --continue` doesn't know about it. `veyra undo` restores the pre-rebase branch. |
 | `git rebase -i` | `veyra rebase -i <upstream>` | ✅ | `pick`, `reword`, `edit`, `squash`, `fixup`, `drop`, `exec`, `break` (and their one-letter forms), plus reordering. Uses `GIT_SEQUENCE_EDITOR` / `sequence.editor`, then the commit editor. |
-| `git rerere` | `veyra merge resolutions` | 🗓 4 | |
+| `git rerere` / `rerere forget` / `rerere clear` | `veyra merge resolutions [status\|list\|forget <path>\|clear\|enable [--auto-stage]\|disable]` (alias `veyra rerere …`) | ✅ | Git's own `.git/rr-cache` format and conflict ids: resolutions recorded by Veyra are replayed by Git and vice versa. Enabled by `rerere.enabled` (or an existing rr-cache). Replays apply to merges, cherry-picks, reverts, rebases and stash applications, slightly shifted conflicts included; `rerere.autoUpdate` stages them. Every replay is reported. |
 | — | structural merge (automatic in `merge`, `pull`, `cherry-pick`, `revert`, `rebase`, `stash apply/pop`) | ✅ | When Git's line merge conflicts but the two sides changed *different* top-level symbols, Veyra merges the file symbol by symbol. It refuses on syntax errors, same-symbol edits, delete-vs-modify and reorders on both sides, and re-parses the result. Every resolution is printed, and recorded as a `Veyra-Structural-Merge:` trailer. `veyra.structuralMerge` = `true` · `stage` (resolve, then stop for review) · `false`. |
 | — | `veyra merge --assist / --explain / --simulate` | 🗓 5 | |
 
@@ -149,7 +149,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git count-objects -v` | `veyra storage stats [--json]` | ✅ | |
 | `git gc` / `git maintenance run` | `veyra maintenance run [--prune-expire 2w]` | ✅ | Packs loose objects (Veyra's own pack writer, indexed by gitoxide), then prunes unreachable loose objects past the grace period. Reachability includes every ref, reflog entry, the index, in-progress state and Veyra's journal. Packs are never rewritten. |
 | `git prune` | `veyra maintenance prune [--expire 2w] [-n]` | ✅ | |
-| — | `veyra impact [--staged] [--tests]` | 🗓 4 | |
+| — | `veyra impact [--staged \| --commit R \| --branch [BASE]] [--tests] [--history N] [--json]` | ✅ | Changed symbols; files that import a changed file or mention a changed symbol (high / medium / low confidence, with the evidence for each); tests to run (tests among the dependents, tests named after changed files, in-file Rust tests); files usually changed together; a risk score with its reasons; and the analysis' limitations. Deterministic: no AI involved. |
 | — | `veyra verify --history [--rev R] [-n N]` | ✅ | Signature status of every commit (good / bad / unsigned) |
 | — | `veyra attest run [--sign] -- <cmd>` / `attest review [--reject] [--sign]` / `attest list` | ✅ | in-toto v1 Statements in Git notes (`refs/notes/veyra/attestations`), shareable with `veyra push origin refs/notes/veyra/attestations` |
 | — | `veyra verify --provenance [--rev R]` | ✅ | Lists a commit's attestations and checks their signatures |

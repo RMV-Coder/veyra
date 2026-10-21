@@ -1,5 +1,6 @@
 //! Command implementations.
 
+mod analysis;
 mod branch;
 mod history;
 mod remote;
@@ -42,7 +43,10 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
         Branch(args) => branch::branch(ctx, args),
         Switch { branch, create, detach, force } => branch::switch(ctx, branch, create, detach, force),
         Checkout { target, new_branch, force, paths } => branch::checkout(ctx, target, new_branch, force, paths),
-        Merge { revision, ff_only, no_ff, message, abort, continue_ } => {
+        Merge { command: Some(crate::cli::MergeCommand::Resolutions { command }), .. } | Rerere { command } => {
+            tools::rerere(ctx, command)
+        }
+        Merge { command: None, revision, ff_only, no_ff, message, abort, continue_ } => {
             branch::merge(ctx, revision, ff_only, no_ff, message, abort, continue_)
         }
         Reset { soft, mixed: _, hard, target, paths } => branch::reset(ctx, soft, hard, target, paths),
@@ -68,6 +72,7 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
         Checkpoint(args) => safety::checkpoint(ctx, args),
         Explain { command } => crate::explain::run(ctx, &command),
         Doctor => tools::doctor(ctx),
+        Impact(args) => analysis::impact(ctx, args),
         Verify(args) => tools::verify(ctx, args),
         Attest { command } => tools::attest(ctx, command),
         Storage { command } => tools::storage(ctx, command),
@@ -128,14 +133,27 @@ pub(crate) fn pathspec(ctx: &Ctx, repo: &Repo, paths: &[String]) -> Result<veyra
     veyra_core::worktree::Pathspec::new(repo, &ctx.cwd, paths)
 }
 
-/// Tell the user about conflicts Veyra resolved symbol by symbol (never silently).
-pub(crate) fn report_structural(repo: &Repo) {
-    for r in repo.take_structural_resolutions() {
-        anstream::println!(
-            "{} {} (structural merge: the sides changed different symbols)",
-            ui::green("Auto-resolved"),
-            r.path
-        );
+/// Tell the user about conflicts Veyra resolved or recorded automatically (never silently).
+pub(crate) fn report_auto_resolutions(repo: &Repo) {
+    use veyra_core::semantic::ResolutionMethod;
+    for r in repo.take_auto_resolutions() {
+        match r.method {
+            ResolutionMethod::Structural => anstream::println!(
+                "{} {} (structural merge: the sides changed different symbols)",
+                ui::green("Auto-resolved"),
+                r.path
+            ),
+            ResolutionMethod::Replayed { staged: true } => {
+                anstream::println!("{} {} using a recorded resolution (staged)", ui::green("Resolved"), r.path)
+            }
+            ResolutionMethod::Replayed { staged: false } => anstream::println!(
+                "{} {} using a recorded resolution; review it, then `veyra add {}`",
+                ui::green("Resolved"),
+                r.path,
+                r.path
+            ),
+            ResolutionMethod::Recorded => anstream::println!("{} the resolution of {}", ui::dim("Recorded"), r.path),
+        }
         for note in &r.notes {
             anstream::println!("    {}", ui::dim(note));
         }

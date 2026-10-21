@@ -461,6 +461,7 @@ pub fn commit(ctx: &Ctx, args: CommitArgs) -> Result<()> {
     let branch = repo.head_label()?;
     let root = if info.parents.is_empty() { " (root-commit)" } else { "" };
     anstream::println!("[{branch}{root} {}] {}", veyra_core::short(&id), info.summary());
+    super::report_auto_resolutions(&repo);
     let added = changes.iter().filter(|c| c.old.is_none()).count();
     let deleted = changes.iter().filter(|c| c.new.is_none()).count();
     let mut line = format!(" {} changed", plural(changes.len(), "file"));

@@ -43,12 +43,14 @@ Command names are Git's (`veyra add`, `veyra commit -m`, `veyra switch -c`, …)
 
 ## Status
 
-**v0.3 — Phases 1–3 of 6 complete.** Everyday local and remote workflows work and are tested
+**v0.4 — Phases 1–4 of 6 complete.** Everyday local and remote workflows work and are tested
 against real Git: commit, branch, switch, merge, rebase, cherry-pick, revert, stash, clean, blame,
 `log --graph`, clone/fetch/pull/**push**, and Git hooks (husky and lint-staged keep working), plus the
 full safety net, plus `rebase -i`, `add -p`, `branch graph/explain`, delta-compressed pushes,
 signed commits and tags with verification, attestations, worktrees, submodules, sparse checkout and
-`clone --scope`, SHA-256 repositories, and `maintenance` (no `git gc` needed). See [docs/ROADMAP.md](docs/ROADMAP.md).
+`clone --scope`, SHA-256 repositories, and `maintenance` (no `git gc` needed). Phase 4 adds code
+intelligence: `diff --semantic`, structural merges of conflicts in different functions, `impact`
+analysis with evidence, and rerere that shares Git's rr-cache. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Install from source
 

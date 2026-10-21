@@ -169,6 +169,54 @@ impl Repo {
         }
     }
 
+    /// Paths of the non-tree entries that differ between two trees, descending only into
+    /// subtrees whose ids differ (much cheaper than flattening both).
+    pub fn changed_paths(&self, old: Option<ObjectId>, new: Option<ObjectId>) -> Result<Vec<BString>> {
+        let mut out = Vec::new();
+        self.changed_paths_into(old, new, &BString::default(), &mut out)?;
+        Ok(out)
+    }
+
+    fn changed_paths_into(
+        &self,
+        old: Option<ObjectId>,
+        new: Option<ObjectId>,
+        prefix: &BString,
+        out: &mut Vec<BString>,
+    ) -> Result<()> {
+        if old == new {
+            return Ok(());
+        }
+        let entries = |id: Option<ObjectId>| -> Result<BTreeMap<BString, (bool, ObjectId)>> {
+            let Some(id) = id else { return Ok(BTreeMap::new()) };
+            let tree = self.git.find_tree(id)?;
+            let mut map = BTreeMap::new();
+            for entry in tree.iter() {
+                let entry = entry?;
+                map.insert(entry.filename().to_owned(), (entry.mode().is_tree(), entry.oid().to_owned()));
+            }
+            Ok(map)
+        };
+        let (a, b) = (entries(old)?, entries(new)?);
+        let names: std::collections::BTreeSet<&BString> = a.keys().chain(b.keys()).collect();
+        for name in names {
+            let path: BString = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}").into() };
+            let (x, y) = (a.get(name), b.get(name));
+            if x.map(|e| e.1) == y.map(|e| e.1) && x.map(|e| e.0) == y.map(|e| e.0) {
+                continue;
+            }
+            let sub = |e: Option<&(bool, ObjectId)>| e.filter(|e| e.0).map(|e| e.1);
+            let (tx, ty) = (sub(x), sub(y));
+            if tx.is_some() || ty.is_some() {
+                self.changed_paths_into(tx, ty, &path, out)?;
+            }
+            if x.is_some_and(|e| !e.0) || y.is_some_and(|e| !e.0) {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+
     /// Write `flat` as a tree object (and all needed subtrees) and return its id.
     pub fn write_flat(&self, flat: &FlatTree) -> Result<ObjectId> {
         if flat.is_empty() {

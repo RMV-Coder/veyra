@@ -379,7 +379,7 @@ pub fn merge(
         };
         Ok((outcome, summary))
     })?;
-    super::report_structural(&repo);
+    super::report_auto_resolutions(&repo);
     match outcome {
         MergeOutcome::AlreadyUpToDate => anstream::println!("Already up to date."),
         MergeOutcome::FastForward { from, to } => anstream::println!(

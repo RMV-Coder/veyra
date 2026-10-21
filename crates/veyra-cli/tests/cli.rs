@@ -1450,3 +1450,82 @@ fn semantic_diff_lists_changed_symbols() {
     assert_eq!(json[0]["language"], "Rust");
     assert_eq!(json[0]["changes"].as_array().unwrap().len(), 4);
 }
+
+#[test]
+fn impact_reports_dependents_tests_and_risk_with_evidence() {
+    require_git!();
+    let env = Env::new();
+    env.write("src/util.ts", "export function parseConfig(text: string) {\n  return JSON.parse(text);\n}\n");
+    env.write("src/app.ts", "import { parseConfig } from './util';\nexport const cfg = parseConfig('{}');\n");
+    env.write("src/other.ts", "export function unrelated() { return 1; }\n");
+    env.write("test/util.test.ts", "import { parseConfig } from '../src/util';\ntest('x', () => parseConfig('{}'));\n");
+    env.ok(&["add", "."]);
+    env.ok(&["commit", "-m", "base"]);
+    env.write(
+        "src/util.ts",
+        "export function parseConfig(text: string, strict: boolean) {\n  return JSON.parse(text);\n}\n",
+    );
+
+    let out = env.ok(&["impact"]);
+    assert!(out.contains("function parseConfig  signature changed"), "{out}");
+    assert!(out.contains("high   src/app.ts"), "{out}");
+    assert!(out.contains("imports src/util.ts"), "{out}");
+    assert!(!out.contains("src/other.ts"), "{out}");
+    assert!(out.contains("Limitations"), "{out}");
+
+    let json: serde_json::Value = serde_json::from_str(&env.ok(&["impact", "--json"])).unwrap();
+    assert_ne!(json["risk"]["level"], "low", "{json}");
+    let tests: serde_json::Value = serde_json::from_str(&env.ok(&["impact", "--tests", "--json"])).unwrap();
+    assert_eq!(tests[0]["path"], "test/util.test.ts", "{tests}");
+
+    // Committed changes can be analysed too.
+    env.ok(&["commit", "-am", "strict mode"]);
+    assert!(env.ok(&["impact", "--commit", "HEAD"]).contains("src/app.ts"));
+}
+
+#[test]
+fn rerere_records_replays_and_shares_resolutions_with_git() {
+    require_git!();
+    let env = Env::new();
+    env.ok(&["rerere", "enable"]);
+    env.commit_file("a.txt", "start\nbase\nend\n", "base");
+    env.ok(&["switch", "-c", "topic"]);
+    env.commit_file("a.txt", "start\ntopic\nend\n", "topic");
+    env.ok(&["switch", "main"]);
+    env.commit_file("a.txt", "start\nmain\nend\n", "main");
+    let resolved = "start\nmain and topic\nend\n";
+
+    // First time: a normal conflict, resolved by hand, recorded on commit.
+    env.veyra(&["merge", "topic"]).assert().failure();
+    assert!(env.ok(&["merge", "resolutions"]).contains("a.txt"));
+    env.write("a.txt", resolved);
+    env.ok(&["add", "a.txt"]);
+    let out = env.ok(&["commit", "--no-edit"]);
+    assert!(out.contains("Recorded the resolution of a.txt"), "{out}");
+    assert!(env.ok(&["rerere", "list"]).contains("resolved"));
+
+    // Second time: replayed into the file; the conflict stays until the user reviews and adds it.
+    env.ok(&["undo"]); // back to the stopped merge…
+    env.ok(&["merge", "--abort"]); // …and to before it
+    let out = env.veyra(&["merge", "topic"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("using a recorded resolution"), "{stdout}");
+    assert_eq!(env.read("a.txt").as_deref(), Some(resolved));
+    assert!(env.git(&["status", "--porcelain"]).contains("UU a.txt"));
+    env.ok(&["merge", "--abort"]);
+
+    // With auto-staging the merge only needs a commit.
+    env.ok(&["rerere", "enable", "--auto-stage"]);
+    let out = env.ok(&["merge", "topic"]);
+    assert!(out.contains("(staged)"), "{out}");
+    assert_eq!(env.git(&["status", "--porcelain"]), "M  a.txt\n");
+    env.ok(&["merge", "--abort"]);
+
+    // Git reads Veyra's recording (same rr-cache format and conflict ids).
+    let mut git = Command::new("git");
+    env.apply(&mut git);
+    let out = git.current_dir(&env.repo).args(["merge", "topic"]).output().unwrap();
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(all.contains("previous resolution"), "{all}");
+    assert_eq!(env.read("a.txt").as_deref(), Some(resolved));
+}

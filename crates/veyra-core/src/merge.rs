@@ -53,6 +53,7 @@ impl Repo {
 
     /// Forget an in-progress merge's bookkeeping files (not the worktree).
     pub fn clear_merge_state(&self) -> Result<()> {
+        self.clear_merge_rr()?;
         for f in merge_files(self) {
             match std::fs::remove_file(&f) {
                 Ok(()) => {}
@@ -192,8 +193,6 @@ impl Repo {
             }
             index.sort_entries();
         }
-        index.remove_tree();
-        index.write(gix::index::write::Options::default())?;
         let mut paths: Vec<BString> = outcome
             .conflicts
             .iter()
@@ -203,6 +202,11 @@ impl Repo {
             .collect();
         paths.sort();
         paths.dedup();
+        // Replay resolutions recorded earlier (rerere); remember the new conflicts.
+        let staged = self.rerere_replay(&mut index, &paths)?;
+        paths.retain(|p| !staged.contains(p));
+        index.remove_tree();
+        index.write(gix::index::write::Options::default())?;
         Ok(paths)
     }
 
@@ -248,6 +252,7 @@ impl Repo {
         let tree = self.write_flat(&crate::flat::flat_from_index_state(&index))?;
         let message = crate::commit::add_trailers(&request.message, &request.trailers);
         let id = self.write_merge_commit(tree, &[ours, theirs], &message, request.sign)?;
+        self.rerere_record()?;
         self.clear_merge_state()?;
         Ok(id)
     }

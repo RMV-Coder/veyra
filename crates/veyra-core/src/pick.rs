@@ -312,6 +312,7 @@ impl Repo {
 
     /// Remove `CHERRY_PICK_HEAD`, `REVERT_HEAD` and `MERGE_MSG`.
     pub fn clear_pick_state(&self) -> Result<()> {
+        self.clear_merge_rr()?;
         for f in [
             self.pick_state_path(PickKind::CherryPick),
             self.pick_state_path(PickKind::Revert),
@@ -450,6 +451,7 @@ impl Repo {
             PickKind::Revert => None,
         };
         let id = self.commit(&CommitRequest { message, author, allow_empty: true, ..Default::default() })?;
+        self.rerere_record()?;
         self.clear_pick_state()?;
         Ok(id)
     }
