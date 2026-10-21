@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veyra viewer</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side" aria-label="Repository">
+    <div class="repo">
+      <h1 class="repo-name" id="repo-name">Loading…</h1>
+      <p class="repo-branch" id="repo-branch"></p>
+      <ul class="repo-status" id="repo-status"></ul>
+    </div>
+    <nav class="sections" aria-label="Sections">
+      <a href="#/history" data-view="history">History</a>
+      <a href="#/journal" data-view="journal">Journal</a>
+      <a href="#/checkpoints" data-view="checkpoints">Checkpoints</a>
+      <a href="#/intents" data-view="intents">Intents</a>
+      <a href="#/impact" data-view="impact">Impact</a>
+      <a href="#/branches" data-view="branches">Branches</a>
+    </nav>
+    <p class="side-foot" id="side-foot"></p>
+  </aside>
+  <main class="main" id="main" tabindex="-1"></main>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

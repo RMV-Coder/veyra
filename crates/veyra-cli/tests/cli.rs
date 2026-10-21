@@ -2046,3 +2046,83 @@ fn release_notes_prepare_and_verify() {
     let v = env.ok(&["release", "verify", "v2.0.0"]);
     assert!(v.contains("not signed") && v.contains("Commits in this release: 4"), "{v}");
 }
+
+/// One raw HTTP request; returns (status code, body).
+fn http(port: u16, request: &str) -> (u16, String) {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.write_all(request.as_bytes()).unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let status = out.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    let body = out.split_once("\r\n\r\n").map(|(_, b)| b.to_owned()).unwrap_or_default();
+    (status, body)
+}
+
+struct KillOnDrop(std::process::Child);
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn serve_is_local_token_protected_read_only_and_serves_the_data() {
+    require_git!();
+    use std::io::BufRead;
+    let env = Env::new();
+    env.commit_file("a.txt", "one\n", "feat: first");
+    env.commit_file("a.txt", "two\n", "fix: second\n\nAssisted-by: test-model");
+    let port = 17000 + (std::process::id() % 2000) as u16;
+    let mut cmd = env.veyra(&["serve", "--no-open", "--port", &port.to_string()]);
+    let mut child = KillOnDrop(cmd.stdout(std::process::Stdio::piped()).spawn().unwrap());
+    let mut line = String::new();
+    std::io::BufReader::new(child.0.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let url = line.split_whitespace().last().unwrap().to_owned();
+    let port: u16 = url.split(':').nth(2).unwrap().split('/').next().unwrap().parse().unwrap();
+    let token = url.split("token=").nth(1).unwrap().trim().to_owned();
+    let get = |path: &str, host: &str, tok: Option<&str>| {
+        let auth = tok.map(|t| format!("X-Veyra-Token: {t}\r\n")).unwrap_or_default();
+        http(port, &format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{auth}Connection: close\r\n\r\n"))
+    };
+    let host = format!("127.0.0.1:{port}");
+
+    // The page itself loads without a token; data never does.
+    assert_eq!(get("/", &host, None).0, 200);
+    assert_eq!(get("/api/summary", &host, None).0, 403);
+    assert_eq!(get("/api/summary", &host, Some("wrong")).0, 403);
+    // DNS rebinding: a foreign Host is refused even with the token.
+    assert_eq!(get("/api/summary", &format!("evil.example:{port}"), Some(&token)).0, 421);
+    // Read-only.
+    let (status, _) = http(
+        port,
+        &format!("POST /api/summary HTTP/1.1\r\nHost: {host}\r\nX-Veyra-Token: {token}\r\nContent-Length: 0\r\n\r\n"),
+    );
+    assert_eq!(status, 405);
+
+    let (status, body) = get("/api/summary", &host, Some(&token));
+    assert_eq!(status, 200, "{body}");
+    let summary: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(summary["branch"], "main");
+    assert_eq!(summary["undo"]["kind"], "commit");
+
+    let log: serde_json::Value = serde_json::from_str(&get("/api/log", &host, Some(&token)).1).unwrap();
+    assert_eq!(log["commits"][0]["summary"], "fix: second");
+    assert_eq!(log["commits"][0]["assisted"][0], "test-model");
+    let id = log["commits"][0]["id"].as_str().unwrap().to_owned();
+    let commit: serde_json::Value =
+        serde_json::from_str(&get(&format!("/api/commit/{id}"), &host, Some(&token)).1).unwrap();
+    assert_eq!(commit["signature"]["status"], "unsigned");
+    assert_eq!(commit["files"][0]["path"], "a.txt");
+    let diff = get(&format!("/api/diff/{id}?path=a.txt"), &host, Some(&token)).1;
+    assert!(diff.contains("-one") && diff.contains("+two"), "{diff}");
+    let journal: serde_json::Value = serde_json::from_str(&get("/api/journal", &host, Some(&token)).1).unwrap();
+    assert!(journal["operations"].as_array().unwrap().iter().any(|o| o["kind"] == "commit"));
+    for endpoint in ["checkpoints", "intents", "branches", "impact?scope=uncommitted"] {
+        let (status, body) = get(&format!("/api/{endpoint}"), &host, Some(&token));
+        assert_eq!(status, 200, "{endpoint}: {body}");
+    }
+    // Nothing the viewer did changed the repository.
+    env.assert_git_clean_and_valid();
+}

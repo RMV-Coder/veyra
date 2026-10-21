@@ -9,6 +9,7 @@ mod remote;
 mod repo;
 mod safety;
 mod sequence;
+mod serve;
 mod stash;
 mod tools;
 
@@ -75,6 +76,7 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
         Explain { command } => crate::explain::run(ctx, &command),
         Doctor => tools::doctor(ctx),
         Impact(args) => analysis::impact(ctx, args),
+        Serve { port, no_open } => serve::serve(ctx, port, no_open),
         Analyze(args) => analysis::analyze(ctx, args),
         Ai { command } => ai::run(ctx, command.unwrap_or(crate::cli::AiCommand::Status)),
         Verify(args) => tools::verify(ctx, args),

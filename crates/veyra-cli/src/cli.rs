@@ -446,6 +446,15 @@ pub enum Command {
         #[command(subcommand)]
         command: BundleCommand,
     },
+    /// Open a local, read-only web viewer: history with signatures and intents, the undo
+    /// journal, checkpoints, impact and branches.
+    Serve {
+        #[arg(long, default_value_t = 7420)]
+        port: u16,
+        /// Don't open a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Check repository health.
     Doctor,
     /// What a change can affect: dependents, tests to run, co-changed files and risk, with evidence.

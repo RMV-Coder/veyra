@@ -122,6 +122,9 @@ proposals are validated deterministically, and nothing changes history without e
 
 ## After 1.0
 
+- [x] `veyra serve`: local read-only viewer (1.2)
+- [x] Pull-request review action (1.2)
+
 - Partial clone (`--filter=blob:none`) and reftable, as gitoxide adds them
 - Hunk-level `commit --split`; out-of-process analyzer plugins
 - C/C++ grammars for the semantic tools

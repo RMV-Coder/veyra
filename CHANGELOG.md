@@ -10,6 +10,15 @@ see [docs/STABILITY.md](docs/STABILITY.md) for what 1.x keeps stable.
   changed symbols, commit signatures and structural merges, as a job summary and one PR comment
   that is updated on each push. Optional `fail-on` gate. See [docs/CI.md](docs/CI.md).
 
+## 1.2.0
+
+- `veyra serve`: a local, read-only web viewer for the data a Git host can't show — signature status,
+  AI-assistance and intent trailers, attestations, notes and semantic changes per commit; the undo
+  journal with the current position; checkpoints; intents and their guards; impact; the branch
+  tree. Loopback only, one-time key, Host checking, GET only.
+- A reusable GitHub Action (`.github/actions/veyra-review`) that posts Veyra's impact, analyzer,
+  semantic-diff and signature results on pull requests.
+
 ## 1.1.0
 
 Git parity for the remaining commands, each checked against Git in the end-to-end tests:

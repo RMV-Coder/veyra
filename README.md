@@ -40,6 +40,9 @@ Undid reset 131f50e9 reset --hard to 3c15442
 - **Optional AI, off by default.** With the Claude API or a local model: `commit --smart`,
   `commit --split`, `merge --assist`, `ai review`. Everything is a proposal you approve, payloads
   are secret-scanned, and `--dry-run` shows exactly what would be sent.
+- **`veyra serve`** opens a local, read-only viewer in your browser: history with signatures, intents
+  and semantic changes, the undo journal with your current position, checkpoints and impact. It shows
+  what GitHub can't, and it never leaves your computer.
 - **`veyra explain reset --hard`** describes what a Git command does, how risky it is, and how to
   recover.
 - **`veyra doctor`** checks repository health and reports PASS/WARN/FAIL with evidence.

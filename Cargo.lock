@@ -3361,7 +3361,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "veyra-ai"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -3371,7 +3371,7 @@ dependencies = [
 
 [[package]]
 name = "veyra-analyze"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "globset",
@@ -3383,7 +3383,7 @@ dependencies = [
 
 [[package]]
 name = "veyra-cli"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anstream 0.6.21",
  "anstyle",
@@ -3408,7 +3408,7 @@ dependencies = [
 
 [[package]]
 name = "veyra-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "crc32fast",
@@ -3426,7 +3426,7 @@ dependencies = [
 
 [[package]]
 name = "veyra-intent"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "globset",
@@ -3439,7 +3439,7 @@ dependencies = [
 
 [[package]]
 name = "veyra-ops"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "proptest",
@@ -3451,7 +3451,7 @@ dependencies = [
 
 [[package]]
 name = "veyra-security"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "proptest",
@@ -3462,7 +3462,7 @@ dependencies = [
 
 [[package]]
 name = "veyra-semantic"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "proptest",
  "regex",
