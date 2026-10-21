@@ -1,5 +1,9 @@
 # Stability promise (1.x)
 
+> While Veyra is in beta (see the README), this promise is the target, not yet a guarantee: if early
+> users find a design problem, a fix may change something listed here, and the release notes will
+> say so.
+
 From 1.0, Veyra follows [semantic versioning](https://semver.org/). Within 1.x, the following are
 stable. Anything not listed here (internal crate APIs, the exact wording of human-readable output,
 colours, hints) may change in any release.

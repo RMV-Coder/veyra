@@ -19,9 +19,13 @@ and what is not supported yet.
 
 | Platform | Status |
 |---|---|
-| Windows 10/11 (x86_64, MSVC) | Tested on every change (CI and development) |
-| Linux (x86_64, aarch64, glibc) | Tested in CI |
-| macOS (Apple silicon, Intel) | Tested in CI |
+| Windows 10/11 (x86_64, MSVC) | Tested: the full suite runs on every change during development |
+| Linux (x86_64, aarch64, glibc) | **Not yet tested.** CI is configured for it but has not completed a run yet |
+| macOS (Apple silicon, Intel) | **Not yet tested.** CI is configured for it but has not completed a run yet |
+
+The CI workflow (`.github/workflows/ci.yml`) runs the same suite on all three platforms, but no run
+has finished so far, so treat Linux and macOS as untested until it does. Reports from either are
+very welcome.
 
 Minimum supported Rust version for building from source: **1.88**.
 
@@ -29,7 +33,7 @@ Minimum supported Rust version for building from source: **1.88**.
 
 | Git | Status |
 |---|---|
-| 2.52 (Windows), the versions on GitHub's Linux and macOS runners | Tested |
+| 2.52 (Windows) | Tested |
 | Any Git ≥ 2.30 | Expected to work: Veyra writes only long-standing formats (index v2–v4, loose objects, packs v2 with `.idx` v2, packed and loose refs, reflogs) |
 
 Git itself is **not** required to use Veyra. It's only needed to run the test suite, and for Git
