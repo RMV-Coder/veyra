@@ -1,0 +1,169 @@
+{
+  "changed_files": [
+    {
+      "added_lines": 12,
+      "language": "Rust",
+      "path": "crates/veyra-analyze/src/lib.rs",
+      "removed_lines": 0,
+      "status": "M",
+      "symbols": [
+        {
+          "change": "added",
+          "kind": "module",
+          "name": "properties"
+        }
+      ]
+    },
+    {
+      "added_lines": 80,
+      "language": "Rust",
+      "path": "crates/veyra-cli/tests/cli.rs",
+      "removed_lines": 0,
+      "status": "M",
+      "symbols": [
+        {
+          "change": "added",
+          "kind": "function",
+          "name": "concurrent_veyra_commands_serialize_through_the_journal_lock"
+        },
+        {
+          "change": "added",
+          "kind": "function",
+          "name": "veyra_and_git_running_at_the_same_time_stay_consistent"
+        }
+      ]
+    },
+    {
+      "added_lines": 13,
+      "language": "Rust",
+      "path": "crates/veyra-core/src/commit.rs",
+      "removed_lines": 0,
+      "status": "M",
+      "symbols": [
+        {
+          "change": "added",
+          "kind": "module",
+          "name": "properties"
+        }
+      ]
+    },
+    {
+      "added_lines": 14,
+      "language": null,
+      "path": ".github/workflows/ci.yml",
+      "removed_lines": 0,
+      "status": "M",
+      "symbols": []
+    },
+    {
+      "added_lines": 92,
+      "language": null,
+      "path": ".github/workflows/release.yml",
+      "removed_lines": 0,
+      "status": "A",
+      "symbols": []
+    },
+    {
+      "added_lines": 4,
+      "language": null,
+      "path": ".gitignore",
+      "removed_lines": 0,
+      "status": "M",
+      "symbols": []
+    }
+  ],
+  "co_changes": [
+    {
+      "of": 10,
+      "path": "crates/veyra-cli/src/cli.rs",
+      "together": 8
+    },
+    {
+      "of": 10,
+      "path": "docs/COMMANDS.md",
+      "together": 8
+    }
+  ],
+  "dependents": [
+    {
+      "confidence": "high",
+      "evidence": [
+        "imports crates/veyra-core/src/index.rs (`veyra_core::diff`, line 13)",
+        "imports crates/veyra-intent/src/lib.rs (`veyra_intent`, line 614)",
+        "mentions `commit` (modified in crates/veyra-ops/src/log.rs)",
+        "mentions `lock` (modified in crates/veyra-ops/src/log.rs)",
+        "mentions `write_index_from_flat` (modified in crates/veyra-core/src/index.rs)"
+      ],
+      "is_test": false,
+      "path": "crates/veyra-cli/src/cmd/ai.rs"
+    },
+    {
+      "confidence": "high",
+      "evidence": [
+        "imports crates/veyra-analyze/src/lib.rs (`veyra_analyze`, line 154)",
+        "imports crates/veyra-core/src/index.rs (`veyra_core::impact`, line 6)",
+        "imports crates/veyra-core/src/worktree.rs (`veyra_core::worktree`, line 7)",
+        "mentions `commit` (modified in crates/veyra-ops/src/log.rs)",
+        "mentions `tests` (modified in crates/veyra-core/src/sparse.rs)"
+      ],
+      "is_test": false,
+      "path": "crates/veyra-cli/src/cmd/analysis.rs"
+    },
+    {
+      "confidence": "high",
+      "evidence": [
+        "imports crates/veyra-core/src/index.rs (`veyra_core`, line 5)",
+        "imports crates/veyra-core/src/merge.rs (`veyra_core::merge`, line 7)",
+        "mentions `commit` (modified in crates/veyra-ops/src/log.rs)"
+      ],
+      "is_test": false,
+      "path": "crates/veyra-cli/src/cmd/branch.rs"
+    },
+    {
+      "confidence": "medium",
+      "evidence": [
+        "imports crates/veyra-core/src/index.rs (`veyra_core`, line 8)"
+      ],
+      "is_test": false,
+      "path": "crates/veyra-cli/src/editor.rs"
+    },
+    {
+      "confidence": "medium",
+      "evidence": [
+        "imports crates/veyra-core/src/index.rs (`veyra_core`, line 14)"
+      ],
+      "is_test": false,
+      "path": "crates/veyra-cli/src/main.rs"
+    }
+  ],
+  "limitations": [
+    "References are matched by name, without type resolution: same-named symbols elsewhere can show up as low-confidence dependents.",
+    "Dynamic imports, reflection, macros, code generation and cross-repository users are not seen.",
+    "26 changed file(s) have no syntax support; only their co-change history is analysed."
+  ],
+  "risk": {
+    "level": "high",
+    "reasons": [
+      "38 file(s) import a changed file",
+      "touches a CI pipeline",
+      "touches a dependency manifest",
+      "touches a security-sensitive code",
+      "large change (1302 lines)"
+    ],
+    "score": 18
+  },
+  "tests": [
+    {
+      "path": "crates/veyra-cli/tests/cli.rs",
+      "reason": "changed in this change"
+    },
+    {
+      "path": "crates/veyra-core/src/commit.rs",
+      "reason": "contains its own unit tests"
+    },
+    {
+      "path": "crates/veyra-core/src/delta.rs",
+      "reason": "contains its own unit tests"
+    }
+  ]
+}

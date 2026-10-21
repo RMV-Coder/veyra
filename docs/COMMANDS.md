@@ -167,6 +167,9 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | — | `veyra intent suggest <paths> [--dry-run]` | ✅ | An AI-proposed intent with guards. Guards the current code doesn't satisfy are dropped before you see the proposal; you approve it before it's written. Verification stays deterministic. |
 | — | `veyra analyze [--migration] [--infra] [scope] [--fail-on high\|medium\|low] [--json]` | ✅ | Deterministic risk rules for what a change *adds*: SQL (DROP/TRUNCATE, DELETE/UPDATE without WHERE, NOT NULL without default, blocking index builds, renames, type changes…), ORM migrations (Rails, Django, Alembic, Knex), Terraform (destroyed resources, open ingress, public buckets, wildcard IAM, disabled protection/encryption), Kubernetes (privileged, host namespaces, root, `:latest`, zero replicas), Dockerfiles and CI workflows. Repository rules and `disable = [...]` in `.veyra/analyzers.toml`. `--fail-on` makes it a CI gate. |
 
+To see `impact`, `analyze`, `diff --semantic` and commit signatures on every pull request, use the
+Veyra review GitHub Action: [CI.md](CI.md).
+
 ## Plumbing
 
 Plumbing commands keep their Git names at the top level (hidden from the main help).

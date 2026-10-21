@@ -35,7 +35,8 @@ Undid reset 131f50e9 reset --hard to 3c15442
 - **Code intelligence.** `veyra diff --semantic` lists the functions and types a change touched,
   conflicts in *different* functions merge on their own (and say so), `veyra impact` shows what a
   change can affect and which tests to run, with the evidence for each claim, and `veyra analyze`
-  flags risky migrations and infrastructure changes.
+  flags risky migrations and infrastructure changes. The [Veyra review action](docs/CI.md) puts all
+  of it, plus commit signatures and structural merges, in one comment on each pull request.
 - **Optional AI, off by default.** With the Claude API or a local model: `commit --smart`,
   `commit --split`, `merge --assist`, `ai review`. Everything is a proposal you approve, payloads
   are secret-scanned, and `--dry-run` shows exactly what would be sent.

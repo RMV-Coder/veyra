@@ -1,0 +1,43 @@
+[
+  {
+    "changes": [
+      {
+        "change": "modified",
+        "kind": "function",
+        "name": "a",
+        "new_line": 1,
+        "new_signature": "fn a()",
+        "old_line": 1,
+        "old_name": null,
+        "old_signature": "fn a()"
+      },
+      {
+        "change": "modified",
+        "kind": "function",
+        "name": "b",
+        "new_line": 5,
+        "new_signature": "fn b()",
+        "old_line": 5,
+        "old_name": null,
+        "old_signature": "fn b()"
+      },
+      {
+        "change": "added",
+        "kind": "function",
+        "name": "c",
+        "new_line": 8,
+        "new_signature": "fn c(x: u8)",
+        "old_line": null,
+        "old_name": null,
+        "old_signature": null
+      }
+    ],
+    "formatting_only": false,
+    "language": "Rust",
+    "outside_symbols_changed": false,
+    "parse_errors": false,
+    "path": "lib.rs",
+    "status": "M",
+    "supported": true
+  }
+]

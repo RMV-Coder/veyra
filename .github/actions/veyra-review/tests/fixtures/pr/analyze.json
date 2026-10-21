@@ -1,0 +1,32 @@
+[
+  {
+    "advice": "stop reading/writing it in a release before, then drop",
+    "area": "migration",
+    "excerpt": "ALTER TABLE users DROP COLUMN email;",
+    "line": 1,
+    "message": "drops a column: its data is gone, and old code reading it breaks",
+    "path": "migrations/001.sql",
+    "rule": "drop-column",
+    "severity": "high"
+  },
+  {
+    "advice": "add a WHERE clause",
+    "area": "migration",
+    "excerpt": "DELETE FROM sessions;",
+    "line": 2,
+    "message": "DELETE without WHERE removes every row",
+    "path": "migrations/001.sql",
+    "rule": "delete-without-where",
+    "severity": "high"
+  },
+  {
+    "advice": "pin a version tag or digest",
+    "area": "infra",
+    "excerpt": "FROM node:latest",
+    "line": 1,
+    "message": "uses an untagged or :latest base image",
+    "path": "Dockerfile",
+    "rule": "docker-latest",
+    "severity": "low"
+  }
+]

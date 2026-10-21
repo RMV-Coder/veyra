@@ -1,0 +1,116 @@
+[
+  {
+    "author": {
+      "email": "dev@example.com",
+      "name": "T",
+      "time": 1792562626
+    },
+    "committer": {
+      "email": "dev@example.com",
+      "name": "T",
+      "time": 1792562626
+    },
+    "id": "270e5cb6c56c14c6f575df230c01334e0d39a314",
+    "message": "change a\n",
+    "parents": [
+      "bd1aa2d165ea9f9153c2fbea60ef131fee2c1d87"
+    ],
+    "summary": "change a",
+    "trailers": []
+  }
+]
+[
+  {
+    "author": {
+      "email": "dev@example.com",
+      "name": "T",
+      "time": 1792562628
+    },
+    "committer": {
+      "email": "dev@example.com",
+      "name": "T",
+      "time": 1792562628
+    },
+    "id": "74424114e6ad4ddc949c460f2497df8b9ae6536a",
+    "message": "feat: change b @octocat <!-- veyra-review --> | pipe\n",
+    "parents": [
+      "bd1aa2d165ea9f9153c2fbea60ef131fee2c1d87"
+    ],
+    "summary": "feat: change b @octocat <!-- veyra-review --> | pipe",
+    "trailers": []
+  }
+]
+[
+  {
+    "author": {
+      "email": "dev@example.com",
+      "name": "T",
+      "time": 1792562628
+    },
+    "committer": {
+      "email": "dev@example.com",
+      "name": "T",
+      "time": 1792562628
+    },
+    "id": "e150c7f4d769dd67a40f070eb6d87675d0d9c011",
+    "message": "Merge branch 'other' into feat\n\nVeyra-Structural-Merge: lib.rs\n",
+    "parents": [
+      "74424114e6ad4ddc949c460f2497df8b9ae6536a",
+      "270e5cb6c56c14c6f575df230c01334e0d39a314"
+    ],
+    "summary": "Merge branch 'other' into feat",
+    "trailers": [
+      {
+        "key": "Veyra-Structural-Merge",
+        "value": "lib.rs"
+      }
+    ]
+  }
+]
+[
+  {
+    "author": {
+      "email": "dev@example.com",
+      "name": "T",
+      "time": 1792562629
+    },
+    "committer": {
+      "email": "dev@example.com",
+      "name": "T",
+      "time": 1792562629
+    },
+    "id": "63413fe38fc2f9b8f247241bf1b64f053f93eafb",
+    "message": "chore: signed by unknown key\n",
+    "parents": [
+      "e150c7f4d769dd67a40f070eb6d87675d0d9c011"
+    ],
+    "summary": "chore: signed by unknown key",
+    "trailers": []
+  }
+]
+[
+  {
+    "author": {
+      "email": "dev@example.com",
+      "name": "T",
+      "time": 1792562629
+    },
+    "committer": {
+      "email": "dev@example.com",
+      "name": "T",
+      "time": 1792562629
+    },
+    "id": "435978ccc6604c4ce9d41b83d4679f5236481fe6",
+    "message": "feat: add c\n\nAssisted-by: Claude Opus 5.5\n",
+    "parents": [
+      "63413fe38fc2f9b8f247241bf1b64f053f93eafb"
+    ],
+    "summary": "feat: add c",
+    "trailers": [
+      {
+        "key": "Assisted-by",
+        "value": "Claude Opus 5.5"
+      }
+    ]
+  }
+]

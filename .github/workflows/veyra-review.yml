@@ -1,0 +1,33 @@
+name: Veyra review
+
+# Veyra's analysis of each pull request, as a job summary and one PR comment that is updated on
+# every push. `pull_request` (not `pull_request_target`): the PR's code runs with a read-only token
+# for forks, so the comment is skipped there and the review stays in the job summary.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: veyra-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # In Veyra's own repository the review uses the veyra this PR builds. Elsewhere:
+      #   uses: RMV-Coder/veyra/.github/actions/veyra-review@main
+      # without source-path (see docs/CI.md).
+      - uses: ./.github/actions/veyra-review
+        with:
+          source-path: .
+          fail-on: high

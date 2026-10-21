@@ -1,0 +1,208 @@
+name: Veyra review
+description: >-
+  Veyra's analysis of a pull request where reviewers look: risk and its reasons, what may be
+  affected (with evidence), tests to run, migration/infrastructure findings, changed symbols, and
+  commit signatures and structural merges. Written to the job summary and one sticky PR comment.
+author: Veyra contributors
+branding:
+  icon: git-pull-request
+  color: purple
+
+inputs:
+  base:
+    description: Base branch of the comparison.
+    default: ${{ github.event.pull_request.base.ref }}
+  head:
+    description: >-
+      Commit to review. actions/checkout checks out GitHub's test merge commit for pull_request
+      events; the action switches to this commit (detached) when HEAD differs. Empty: review HEAD.
+    default: ${{ github.event.pull_request.head.sha }}
+  fail-on:
+    description: Fail the job if `veyra analyze --fail-on` would (high, medium or low). Empty never fails.
+    default: ""
+  comment:
+    description: Post the review as a PR comment, updating the previous one instead of adding another.
+    default: "true"
+  pr-number:
+    description: Pull request to comment on.
+    default: ${{ github.event.pull_request.number }}
+  github-token:
+    description: Token for the PR comment (needs pull-requests write).
+    default: ${{ github.token }}
+  install:
+    description: >-
+      How to get veyra: `source` (cargo build; needs a Rust toolchain), `release` (download a
+      release binary, checksum-verified) or `none` (already on PATH).
+    default: source
+  version:
+    description: >-
+      Veyra to install: a tag, branch or commit (source) or a release tag (release). Empty: the
+      action's own ref when it is used as owner/repo/path@ref, else main or the latest release.
+    default: ""
+  source-path:
+    description: >-
+      With `install: source`, build the Veyra workspace at this path (e.g. `.` in Veyra's own
+      repository) instead of fetching one.
+    default: ""
+  max-commits:
+    description: Check the signatures and trailers of at most this many of the PR's newest commits.
+    default: "250"
+
+outputs:
+  risk:
+    description: Risk level from `veyra impact` (low, medium, high).
+    value: ${{ steps.render.outputs.risk }}
+  risk-score:
+    description: Risk score from `veyra impact`.
+    value: ${{ steps.render.outputs.risk-score }}
+  findings:
+    description: Number of `veyra analyze` findings.
+    value: ${{ steps.render.outputs.findings }}
+  high-findings:
+    description: Number of high-severity findings.
+    value: ${{ steps.render.outputs.high-findings }}
+  tests:
+    description: Number of tests `veyra impact` suggests running.
+    value: ${{ steps.render.outputs.tests }}
+  unsigned-commits:
+    description: PR commits without a signature.
+    value: ${{ steps.render.outputs.unsigned-commits }}
+  unverified-signatures:
+    description: PR commits signed by a key the runner doesn't trust.
+    value: ${{ steps.render.outputs.unverified-signatures }}
+  bad-signatures:
+    description: PR commits with a bad signature.
+    value: ${{ steps.render.outputs.bad-signatures }}
+  summary-file:
+    description: Path of the rendered Markdown review, in full (the comment may be shortened to fit).
+    value: ${{ steps.render.outputs.summary-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check inputs
+      shell: bash
+      env:
+        FAIL_ON: ${{ inputs.fail-on }}
+        INSTALL: ${{ inputs.install }}
+      run: |
+        case "$FAIL_ON" in ""|high|medium|low) ;; *) echo "::error::fail-on must be high, medium, low or empty (got '$FAIL_ON')"; exit 1 ;; esac
+        case "$INSTALL" in source|release|none) ;; *) echo "::error::install must be source, release or none (got '$INSTALL')"; exit 1 ;; esac
+
+    - name: Plan the Veyra install
+      id: plan
+      shell: bash
+      env:
+        VEYRA_INSTALL: ${{ inputs.install }}
+        VEYRA_VERSION: ${{ inputs.version }}
+        VEYRA_ACTION_REF: ${{ github.action_ref }}
+        VEYRA_SOURCE_PATH: ${{ inputs.source-path }}
+      run: bash "$GITHUB_ACTION_PATH/setup-veyra.sh" plan >> "$GITHUB_OUTPUT"
+
+    - name: Cache the Veyra build
+      if: steps.plan.outputs.cache-key != ''
+      uses: actions/cache@v4
+      with:
+        key: ${{ steps.plan.outputs.cache-key }}
+        path: ${{ steps.plan.outputs.cache-path }}
+
+    - name: Install Veyra
+      shell: bash
+      env:
+        VEYRA_INSTALL: ${{ inputs.install }}
+        VEYRA_VERSION: ${{ inputs.version }}
+        VEYRA_ACTION_REF: ${{ github.action_ref }}
+        VEYRA_SOURCE_PATH: ${{ inputs.source-path }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: bash "$GITHUB_ACTION_PATH/setup-veyra.sh" install
+
+    - name: Find the PR range
+      id: range
+      shell: bash
+      env:
+        BASE: ${{ inputs.base }}
+        HEAD_SHA: ${{ inputs.head }}
+      run: |
+        [ -n "$BASE" ] || { echo "::error::no base branch: run on pull_request or set the base input"; exit 1; }
+        base_ref="refs/remotes/origin/$BASE"
+        git fetch --no-tags --quiet origin "+refs/heads/$BASE:$base_ref"
+        if [ -n "$HEAD_SHA" ] && [ "$(git rev-parse HEAD)" != "$HEAD_SHA" ]; then
+          git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null || git fetch --no-tags --quiet origin "$HEAD_SHA"
+          echo "Reviewing the PR head $HEAD_SHA (HEAD was $(git rev-parse --short HEAD), GitHub's test merge)"
+          git checkout --quiet --detach "$HEAD_SHA"
+        fi
+        # A shallow clone may not reach the merge base yet: deepen both sides until it does.
+        for _ in 1 2 3 4 5 6 7 8; do
+          git merge-base "$base_ref" HEAD >/dev/null 2>&1 && break
+          [ "$(git rev-parse --is-shallow-repository)" = true ] || break
+          git fetch --no-tags --quiet --deepen=200 origin "+refs/heads/$BASE:$base_ref" "$(git rev-parse HEAD)"
+        done
+        if ! git merge-base "$base_ref" HEAD >/dev/null 2>&1 && [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+          git fetch --no-tags --quiet --unshallow origin
+        fi
+        fork=$(git merge-base "$base_ref" HEAD) || { echo "::error::origin/$BASE and HEAD have no common history"; exit 1; }
+        echo "base-ref=$base_ref" >> "$GITHUB_OUTPUT"
+        echo "fork=$fork" >> "$GITHUB_OUTPUT"
+        echo "Comparing $(git rev-parse --short HEAD) with origin/$BASE (fork point $(git rev-parse --short "$fork"))"
+
+    - name: Run Veyra's analyses
+      shell: bash
+      env:
+        VEYRA_REVIEW_MAX_COMMITS: ${{ inputs.max-commits }}
+        VEYRA_REVIEW_BASE_LABEL: ${{ inputs.base }}
+        BASE_REF: ${{ steps.range.outputs.base-ref }}
+      run: |
+        out="$RUNNER_TEMP/veyra-review"
+        rm -rf "$out"
+        bash "$GITHUB_ACTION_PATH/collect.sh" "$BASE_REF" "$out"
+
+    - name: Render the review
+      id: render
+      shell: bash
+      run: |
+        out="$RUNNER_TEMP/veyra-review"
+        # python3 can be a Microsoft Store stub on Windows.
+        if python3 -c "" 2>/dev/null; then py=python3; else py=python; fi
+        # The comment must fit in 65,536 characters; the job summary gets everything.
+        "$py" "$GITHUB_ACTION_PATH/render.py" "$out" --summary "$out/summary.md" \
+          --github-output "$GITHUB_OUTPUT" > "$out/comment.md"
+        cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY"
+        echo "summary-file=$out/summary.md" >> "$GITHUB_OUTPUT"
+
+    - name: Post or update the PR comment
+      if: inputs.comment == 'true' && inputs.pr-number != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ inputs.pr-number }}
+      run: |
+        out="$RUNNER_TEMP/veyra-review"
+        # python3 can be a Microsoft Store stub on Windows.
+        if python3 -c "" 2>/dev/null; then py=python3; else py=python; fi
+        "$py" -c 'import json, sys; json.dump({"body": open(sys.argv[1], encoding="utf-8").read()}, open(sys.argv[2], "w"))' \
+          "$out/comment.md" "$out/comment.json"
+        comments="repos/$GITHUB_REPOSITORY/issues/$PR/comments"
+        post() {
+          # The comment this action wrote last time: from a bot, starting with the hidden marker.
+          ids=$(gh api --paginate "$comments" \
+            --jq '.[] | select(.user.type == "Bot" and (.body | startswith("<!-- veyra-review -->"))) | .id')
+          id=${ids%%$'\n'*}
+          if [ -n "$id" ]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" --input "$out/comment.json" > /dev/null
+            echo "Updated the review comment ($id)"
+          else
+            gh api --method POST "$comments" --input "$out/comment.json" > /dev/null
+            echo "Posted the review comment"
+          fi
+        }
+        if ! post; then
+          echo "::warning::Could not post the review comment (pull requests from forks get a read-only token). The review is in the job summary."
+        fi
+
+    - name: Gate on analyzer findings
+      if: inputs.fail-on != ''
+      shell: bash
+      env:
+        FAIL_ON: ${{ inputs.fail-on }}
+        FORK: ${{ steps.range.outputs.fork }}
+      run: veyra analyze --branch "$FORK" --fail-on "$FAIL_ON"

@@ -1,0 +1,50 @@
+{
+  "format": null,
+  "label": "270e5cb",
+  "object": "270e5cb6c56c14c6f575df230c01334e0d39a314",
+  "signed": false,
+  "signer": null,
+  "status": null,
+  "trust": null,
+  "valid": false
+}
+{
+  "format": "ssh",
+  "label": "7442411",
+  "object": "74424114e6ad4ddc949c460f2497df8b9ae6536a",
+  "signed": true,
+  "signer": "t@e.x",
+  "status": "good",
+  "trust": "fully",
+  "valid": true
+}
+{
+  "format": null,
+  "label": "e150c7f",
+  "object": "e150c7f4d769dd67a40f070eb6d87675d0d9c011",
+  "signed": false,
+  "signer": null,
+  "status": null,
+  "trust": null,
+  "valid": false
+}
+{
+  "format": "ssh",
+  "label": "63413fe",
+  "object": "63413fe38fc2f9b8f247241bf1b64f053f93eafb",
+  "signed": true,
+  "signer": null,
+  "status": "good",
+  "trust": "undefined",
+  "valid": false
+}
+{
+  "format": null,
+  "label": "435978c",
+  "object": "435978ccc6604c4ce9d41b83d4679f5236481fe6",
+  "signed": false,
+  "signer": null,
+  "status": null,
+  "trust": null,
+  "valid": false
+}

@@ -23,6 +23,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests (end-to-end tests use the runner's git as the oracle)
         run: cargo test --workspace
+      - name: Veyra review action (renderer tests, and collect.sh with the veyra just built)
+        shell: bash
+        run: |
+          if python3 -c "" 2>/dev/null; then py=python3; else py=python; fi
+          "$py" -m unittest discover -s .github/actions/veyra-review/tests -v
 
   lint:
     name: format and fuzz targets

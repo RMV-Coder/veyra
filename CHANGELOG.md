@@ -3,6 +3,13 @@
 All notable changes are listed here. Veyra follows [semantic versioning](https://semver.org/);
 see [docs/STABILITY.md](docs/STABILITY.md) for what 1.x keeps stable.
 
+## Unreleased
+
+- **Veyra review GitHub Action** (`.github/actions/veyra-review`): on each pull request, the
+  risk and its reasons, analyzer findings, tests to run, what may be affected (with evidence),
+  changed symbols, commit signatures and structural merges, as a job summary and one PR comment
+  that is updated on each push. Optional `fail-on` gate. See [docs/CI.md](docs/CI.md).
+
 ## 1.1.0
 
 Git parity for the remaining commands, each checked against Git in the end-to-end tests:
