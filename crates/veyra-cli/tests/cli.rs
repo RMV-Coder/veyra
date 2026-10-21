@@ -1893,7 +1893,9 @@ fn format_patch_and_am_interoperate_with_git() {
     env.commit_file("a.txt", "one\nTWO\nthree\n", "change two\n\nWith a body.");
     env.commit_file("new.txt", "hello", "add new file");
     env.ok(&["format-patch", "HEAD~2", "-o", "out"]);
-    let files: Vec<_> = std::fs::read_dir(env.repo.join("out")).unwrap().map(|e| e.unwrap().path()).collect();
+    // In patch order (0001-…, 0002-…): directory listing order is arbitrary on Linux.
+    let mut files: Vec<_> = std::fs::read_dir(env.repo.join("out")).unwrap().map(|e| e.unwrap().path()).collect();
+    files.sort();
     assert_eq!(files.len(), 2, "{files:?}");
 
     // Git applies Veyra's patches…
