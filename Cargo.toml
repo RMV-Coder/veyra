@@ -5,20 +5,20 @@ members = ["crates/*"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["Veyra contributors"]
 
 [workspace.dependencies]
-veyra-core = { path = "crates/veyra-core", version = "1.2.0" }
-veyra-ops = { path = "crates/veyra-ops", version = "1.2.0" }
-veyra-semantic = { path = "crates/veyra-semantic", version = "1.2.0" }
-veyra-security = { path = "crates/veyra-security", version = "1.2.0" }
-veyra-intent = { path = "crates/veyra-intent", version = "1.2.0" }
-veyra-ai = { path = "crates/veyra-ai", version = "1.2.0" }
-veyra-analyze = { path = "crates/veyra-analyze", version = "1.2.0" }
+veyra-core = { path = "crates/veyra-core", version = "1.3.0" }
+veyra-ops = { path = "crates/veyra-ops", version = "1.3.0" }
+veyra-semantic = { path = "crates/veyra-semantic", version = "1.3.0" }
+veyra-security = { path = "crates/veyra-security", version = "1.3.0" }
+veyra-intent = { path = "crates/veyra-intent", version = "1.3.0" }
+veyra-ai = { path = "crates/veyra-ai", version = "1.3.0" }
+veyra-analyze = { path = "crates/veyra-analyze", version = "1.3.0" }
 
 gix = { version = "0.89", default-features = true }
 anyhow = "1"

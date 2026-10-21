@@ -13,6 +13,10 @@
 //! severity = "high"
 //! message = "Payments are never hard-deleted; use the archive procedure"
 //! ```
+//!
+//! and out-of-process analyzers (`[[plugin]]`, see [`plugin`]), which run only once trusted locally.
+
+pub mod plugin;
 
 use std::collections::BTreeSet;
 
@@ -53,6 +57,7 @@ pub enum Area {
     Migration,
     Infra,
     Custom,
+    Plugin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -632,14 +637,18 @@ fn default_severity() -> String {
 pub struct Config {
     #[serde(default, rename = "rule")]
     pub rules: Vec<CustomRule>,
-    /// Built-in rule ids to turn off for this repository.
+    /// Built-in rule ids to turn off for this repository (also `plugin/rule` or a plugin id).
     #[serde(default)]
     pub disable: Vec<String>,
+    /// Out-of-process analyzers; they run only once trusted locally.
+    #[serde(default, rename = "plugin")]
+    pub plugins: Vec<plugin::PluginSpec>,
 }
 
 pub struct Analyzer {
     custom: Vec<(CustomRule, globset::GlobSet, Regex, Severity)>,
     disabled: BTreeSet<String>,
+    plugins: Vec<plugin::PluginSpec>,
 }
 
 impl Analyzer {
@@ -655,7 +664,26 @@ impl Analyzer {
                 .with_context(|| format!("rule {}: severity must be high, medium or low", r.id))?;
             custom.push((r.clone(), b.build()?, re, sev));
         }
-        Ok(Analyzer { custom, disabled: config.disable.iter().cloned().collect() })
+        let mut ids = BTreeSet::new();
+        for p in &config.plugins {
+            if p.id.is_empty() || p.id.contains('/') || !ids.insert(p.id.as_str()) {
+                anyhow::bail!("plugin ids must be unique, non-empty and without '/' (got '{}')", p.id);
+            }
+            if p.command.is_empty() {
+                anyhow::bail!("plugin {}: `command` is empty", p.id);
+            }
+        }
+        Ok(Analyzer { custom, disabled: config.disable.iter().cloned().collect(), plugins: config.plugins.clone() })
+    }
+
+    /// The declared plugins (trusted or not), minus disabled ones.
+    pub fn plugins(&self) -> impl Iterator<Item = &plugin::PluginSpec> {
+        self.plugins.iter().filter(|p| !self.disabled.contains(&p.id))
+    }
+
+    /// Drop the findings of disabled rules (for plugin findings, which come in separately).
+    pub fn keep_enabled(&self, findings: Vec<Finding>) -> Vec<Finding> {
+        findings.into_iter().filter(|f| !self.disabled.contains(&f.rule)).collect()
     }
 
     pub fn from_toml(text: &str) -> Result<Analyzer> {

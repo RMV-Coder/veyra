@@ -37,20 +37,23 @@ Undid reset 131f50e9 reset --hard to 3c15442
 - **Intents.** Record *why* code exists (`veyra intent create`) along with deterministic guards
   such as "`src/payment/**` must still contain `idempotencyKey`". Veyra warns when a change, made
   by a person or an AI agent, would remove that mechanism.
-- **Code intelligence.** `veyra diff --semantic` lists the functions and types a change touched,
-  conflicts in *different* functions merge on their own (and say so), `veyra impact` shows what a
-  change can affect and which tests to run, with the evidence for each claim, and `veyra analyze`
-  flags risky migrations and infrastructure changes. The [Veyra review action](docs/CI.md) puts all
+- **Code intelligence** for seventeen languages (Rust, TypeScript/JavaScript, Python, Go, Java, C,
+  C++, C#, Ruby, PHP, Kotlin, Swift, Scala, Bash, Lua, Elixir). `veyra diff --semantic` lists the
+  functions and types a change touched, conflicts in *different* functions merge on their own (and
+  say so), `veyra impact` shows what a change can affect and which tests to run, with the evidence
+  for each claim, and `veyra analyze` flags risky migrations and infrastructure changes, with your
+  own rules and [plugins](docs/PLUGINS.md) on top. The [Veyra review action](docs/CI.md) puts all
   of it, plus commit signatures and structural merges, in one comment on each pull request.
 - **Optional AI, off by default.** With the Claude API or a local model: `commit --smart`,
-  `commit --split`, `merge --assist`, `ai review`. Everything is a proposal you approve, payloads
+  `commit --split` (by file or by hunk), `merge --assist`, `ai review`. Everything is a proposal you approve, payloads
   are secret-scanned, and `--dry-run` shows exactly what would be sent.
 - **`veyra serve`** opens a local, read-only viewer in your browser: history with signatures, intents
   and semantic changes, the undo journal with your current position, checkpoints and impact. It shows
   what GitHub can't, and it never leaves your computer.
 - **`veyra explain reset --hard`** describes what a Git command does, how risky it is, and how to
   recover.
-- **`veyra doctor`** checks repository health and reports PASS/WARN/FAIL with evidence.
+- **`veyra doctor`** checks repository health and reports PASS/WARN/FAIL with evidence; `--full`
+  verifies every object, like `git fsck --full`.
 - **Built for scripts and agents:** `--json` output, `--assisted-by` provenance trailers, and an
   agent mode (`VEYRA_AGENT=1`) that requires `--yes` for destructive commands.
 
@@ -59,13 +62,17 @@ Command names are Git's (`veyra add`, `veyra commit -m`, `veyra switch -c`, …)
 
 ## Status
 
-**v1.0 — all six roadmap phases are complete.** Everyday local and remote workflows (commit,
-branch, merge, rebase including `-i`, cherry-pick, revert, stash, blame, clone/fetch/pull/push,
-hooks) are tested against real Git, together with the safety net, signing and attestations,
-worktrees, submodules, sparse checkout, SHA-256 repositories, code intelligence and the optional AI
-layer. What is and isn't supported is listed in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md);
-what stays stable across 1.x is in [docs/STABILITY.md](docs/STABILITY.md). The remaining gaps
-(partial clone, reftable, hunk-level `commit --split`) are tracked in [docs/ROADMAP.md](docs/ROADMAP.md).
+**v1.3 — all six roadmap phases are complete.** Everyday local and remote workflows (commit,
+branch, merge with strategies, rebase including `-i`, cherry-pick, revert, stash, blame,
+clone/fetch/pull/push, partial and shallow clones, hooks, Git LFS) are tested against real Git,
+together with the safety net, signing and attestations, worktrees, submodules, sparse checkout,
+SHA-256 repositories, code intelligence and the optional AI layer. Rebases, bisects and
+cherry-pick sequences can be started in one tool and finished in the other. What is and isn't
+supported is listed in [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) (the one known gap is
+reftable repositories, which gitoxide can't read yet); what stays stable across 1.x is in
+[docs/STABILITY.md](docs/STABILITY.md).
+
+The documentation is also published as a site, built from [docs/](docs/) with mdBook.
 
 ## Install
 

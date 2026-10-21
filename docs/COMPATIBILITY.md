@@ -48,21 +48,23 @@ hooks that call `git`.
 | Loose objects, packs, multi-pack directories | ✅ | Read via gitoxide; Veyra writes packs for large `add`s and `maintenance` |
 | `commit-graph`, multi-pack-index | Read | Not written; `git maintenance` can still maintain them |
 | Packed refs, loose refs, symbolic refs, reflogs | ✅ | |
-| Reftable (`extensions.refStorage=reftable`) | ❌ | Not supported by gitoxide yet |
+| Reftable (`extensions.refStorage=reftable`) | ❌ | Not supported by gitoxide yet. Veyra refuses such repositories with the fix: `git refs migrate --ref-format=files` (Git 2.46+) |
 | Index v2/v3/v4, split index off | ✅ | Split index and untracked cache are not written |
 | `.gitattributes` filters (`text`, `eol`, `ident`, external drivers) | ✅ | Through gitoxide's filter pipeline |
-| Git LFS | Untested | LFS uses a filter driver, which the pipeline runs; not covered by tests |
+| Git LFS | ✅ | The filter process stores pointers on `add`, the `pre-push` hook uploads content on `push`, and checkouts smudge it back (tested with git-lfs 3.7) |
 | Sparse checkout (cone mode) | ✅ | Same files and skip-worktree bits as Git |
-| Non-cone sparse patterns | ❌ | Veyra refuses to change them |
+| Non-cone sparse patterns | ✅ | `veyra sparse set --no-cone`; gitignore-style patterns, last match wins, shared with Git |
 | Linked worktrees | ✅ | |
 | Submodules | ✅ | Cloned in the embedded layout; `git submodule absorbgitdirs` converts |
-| Shallow clones | Read | `clone --depth` is not offered yet |
-| Partial clone (`--filter`) | ❌ | Waiting for gitoxide support |
+| Shallow clones | ✅ | `clone --depth`, `fetch --depth`, `fetch --unshallow`; `.git/shallow` is Git's |
+| Partial clone (`--filter`) | ✅ | `blob:none`, `blob:limit=<n>`, `tree:<depth>`, configured as Git does (promisor remote, `.promisor` packs); missing objects are fetched on demand, and with `--scope` only the scope's files are downloaded. `veyra backfill` fetches the rest |
 | Commit/tag signing: OpenPGP, X.509, SSH | ✅ | |
-| Hooks (`core.hooksPath`, husky, lint-staged) | ✅ | |
+| Hooks (`core.hooksPath`, husky, lint-staged) | ✅ | `pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, `post-checkout`, `post-merge`, `pre-rebase`, `post-rewrite` (after `--amend`), `pre-push` |
 | `rerere` (`.git/rr-cache`) | ✅ | Shared with Git |
 | Notes (`refs/notes/*`) | ✅ | Used for attestations |
-| Merge strategies other than the default three-way merge (`ours`, `octopus`, `subtree`) | ❌ | |
+| Merge strategies (`-s ours`, `-s subtree`, octopus) and options (`-X ours`, `-X theirs`, `-X subtree=<dir>`) | ✅ | An octopus merge with a conflict is refused before anything changes, as in Git |
+| Operations in progress: merge, rebase (`.git/rebase-merge`), cherry-pick/revert sequences (`.git/sequencer`), bisect | ✅ | Started by either tool, continued or aborted by the other |
+| Object verification | ✅ | `veyra doctor --full` rehashes every object, checks pack checksums and connectivity (like `git fsck --full`) |
 | Transports: HTTPS, SSH, local paths, `file://` | ✅ | Fetch and clone via gitoxide; push via Veyra's receive-pack client |
 | Git protocol v2 for fetch | ✅ | Push uses v0/v1, like Git |
 

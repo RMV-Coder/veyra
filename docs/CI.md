@@ -53,7 +53,7 @@ Actions cache. Once release binaries are published, `install: release` downloads
 archive's checksum is verified, and its build provenance when `gh` is available) and the Rust
 toolchain step can go.
 
-Veyra's own repository runs it in [`.github/workflows/veyra-review.yml`](../.github/workflows/veyra-review.yml),
+Veyra's own repository runs it in [`.github/workflows/veyra-review.yml`](https://github.com/RMV-Coder/veyra/blob/main/.github/workflows/veyra-review.yml),
 with `source-path: .` so each PR is reviewed by the Veyra it builds.
 
 ### Use `pull_request`, not `pull_request_target`

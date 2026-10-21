@@ -170,24 +170,28 @@ pub(crate) fn split_commit(ctx: &Ctx, args: CommitArgs) -> Result<()> {
     }
     let head = repo.flat_head()?;
     let index = repo.flat_index()?;
-    let changes = flat::diff(&head, &index);
-    let files: Vec<String> = changes.iter().map(|c| c.path.to_string()).collect();
-    if files.len() < 2 {
-        bail!(
-            "only {} staged; there is nothing to split (try `veyra commit --smart`)",
-            super::plural(files.len(), "file")
-        );
+    // Files, or hunks of files changed in several places: hunks of one file can go to different commits.
+    let units = repo.change_units(&head, &index)?;
+    if units.len() < 2 {
+        bail!("the staged change is a single hunk; there is nothing to split (try `veyra commit --smart`)");
     }
-    let request = tasks::split(&diff_text(&repo, &head, &index)?, &files, &recent_subjects(&repo)?);
+    let planned: Vec<(tasks::SplitUnit, String)> = units
+        .iter()
+        .map(|u| (tasks::SplitUnit { id: u.id.clone(), path: u.path.to_string() }, u.diff.clone()))
+        .collect();
+    let request = tasks::split(&planned, &recent_subjects(&repo)?);
     let Some(reply) = send(&repo, &request, args.dry_run)? else { return Ok(()) };
     let plan: tasks::SplitPlan = veyra_ai::parse_json(&reply.text)?;
-    plan.validate(&files).map_err(|e| anyhow::anyhow!("the proposed split is not usable: {e}; nothing was changed"))?;
+    let split_units: Vec<tasks::SplitUnit> = planned.into_iter().map(|(u, _)| u).collect();
+    let groups = plan
+        .validate(&split_units)
+        .map_err(|e| anyhow::anyhow!("the proposed split is not usable: {e}; nothing was changed"))?;
 
     anstream::println!("{}", ui::bold(&format!("Proposed: {}", super::plural(plan.commits.len(), "commit"))));
-    for (i, c) in plan.commits.iter().enumerate() {
+    for (i, (c, ids)) in plan.commits.iter().zip(&groups).enumerate() {
         anstream::println!("\n  {}. {}", i + 1, c.message.lines().next().unwrap_or_default());
-        for f in &c.files {
-            anstream::println!("       {}", ui::dim(f));
+        for id in ids {
+            anstream::println!("       {}", ui::dim(id));
         }
     }
     anstream::println!();
@@ -196,15 +200,10 @@ pub(crate) fn split_commit(ctx: &Ctx, args: CommitArgs) -> Result<()> {
     }
 
     let trailer = ("Assisted-by".to_owned(), assisted_by(&reply, &settings(&repo)));
-    let mut partial = head.clone();
-    for c in &plan.commits {
-        for f in &c.files {
-            let key: veyra_core::BString = f.as_str().into();
-            match index.get(&key) {
-                Some(e) => partial.insert(key, *e),
-                None => partial.remove(&key),
-            };
-        }
+    let mut chosen: Vec<&veyra_core::patch::ChangeUnit> = Vec::new();
+    for (c, ids) in plan.commits.iter().zip(&groups) {
+        chosen.extend(units.iter().filter(|u| ids.contains(&u.id)));
+        let partial = repo.apply_units(&head, &index, &chosen)?;
         repo.write_index_from_flat(&partial, &Default::default())?;
         let message = veyra_core::commit::add_trailers(&c.message, std::slice::from_ref(&trailer));
         if let Err(err) = super::repo::commit(ctx, commit_args_like(&args, message)) {

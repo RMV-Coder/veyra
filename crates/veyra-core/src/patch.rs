@@ -10,6 +10,7 @@ use similar::{DiffOp, TextDiff};
 use crate::Repo;
 use crate::flat::FlatEntry;
 use crate::worktree::Pathspec;
+use gix::objs::tree::EntryKind;
 
 const CONTEXT: usize = 3;
 
@@ -142,7 +143,103 @@ pub fn accepted_changes(hunks: &[Hunk], accepted: &[bool]) -> HashSet<(usize, us
     hunks.iter().zip(accepted).filter(|(_, a)| **a).flat_map(|(h, _)| h.changes.iter().copied()).collect()
 }
 
+/// One piece of a change that `commit --split` can give to a commit: a whole file, or one hunk
+/// of a text file whose change has several.
+#[derive(Debug, Clone)]
+pub struct ChangeUnit {
+    /// `path` for a whole file, `path#N` (1-based) for a file's N-th hunk.
+    pub id: String,
+    pub path: BString,
+    /// The hunk's changes; `None` for a whole-file unit.
+    pub changes: Option<Vec<(usize, usize)>>,
+    /// The unit's diff, as shown to whoever plans the split.
+    pub diff: String,
+}
+
 impl Repo {
+    /// Cut the change `old → new` (e.g. HEAD → index) into units: one per hunk of each text file
+    /// changed in several places, one per file otherwise.
+    pub fn change_units(&self, old: &crate::FlatTree, new: &crate::FlatTree) -> Result<Vec<ChangeUnit>> {
+        let changes = crate::flat::diff(old, new);
+        let diffs = self.diff_changes(&changes, crate::diff::NewSide::Objects, CONTEXT)?;
+        let mut out = Vec::new();
+        for (change, rendered) in changes.iter().zip(&diffs) {
+            let path = change.path.clone();
+            let whole = || ChangeUnit {
+                id: path.to_str_lossy().into_owned(),
+                path: path.clone(),
+                changes: None,
+                diff: crate::diff::render(rendered, None),
+            };
+            let is_file = |e: &FlatEntry| matches!(e.kind, EntryKind::Blob | EntryKind::BlobExecutable);
+            let (Some(o), Some(n)) = (change.old.filter(is_file), change.new.filter(is_file)) else {
+                out.push(whole()); // added, deleted, a symlink or a submodule
+                continue;
+            };
+            let texts = self.text_pair(o.id, n.id)?;
+            let Some((old_text, new_text)) = texts else {
+                out.push(whole());
+                continue;
+            };
+            let file_hunks = hunks(&old_text, &new_text);
+            if file_hunks.len() < 2 {
+                out.push(whole());
+                continue;
+            }
+            for (i, h) in file_hunks.into_iter().enumerate() {
+                out.push(ChangeUnit {
+                    id: format!("{path}#{}", i + 1),
+                    path: path.clone(),
+                    changes: Some(h.changes),
+                    diff: format!("--- a/{path}\n+++ b/{path}\n{}", h.text),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// `old` with the `chosen` units of `old → new` applied (see [`Repo::change_units`]).
+    pub fn apply_units(
+        &self,
+        old: &crate::FlatTree,
+        new: &crate::FlatTree,
+        units: &[&ChangeUnit],
+    ) -> Result<crate::FlatTree> {
+        let mut out = old.clone();
+        let mut accepted: BTreeMap<BString, HashSet<(usize, usize)>> = BTreeMap::new();
+        for unit in units {
+            match &unit.changes {
+                None => {
+                    match new.get(&unit.path) {
+                        Some(e) => out.insert(unit.path.clone(), *e),
+                        None => out.remove(&unit.path),
+                    };
+                }
+                Some(changes) => accepted.entry(unit.path.clone()).or_default().extend(changes.iter().copied()),
+            }
+        }
+        for (path, changes) in accepted {
+            let (Some(o), Some(n)) = (old.get(&path), new.get(&path)) else { continue };
+            let (old_text, new_text) = self.text_pair(o.id, n.id)?.context("hunks of a file that isn't text")?;
+            let content = apply(&old_text, &new_text, &changes);
+            let id = if content == new_text { n.id } else { self.write_blob(content.as_bytes())? };
+            out.insert(path, FlatEntry { kind: n.kind, id });
+        }
+        Ok(out)
+    }
+
+    /// Both blobs as text, unless either is binary.
+    fn text_pair(&self, old: gix::ObjectId, new: gix::ObjectId) -> Result<Option<(String, String)>> {
+        let (o, n) = (self.read_blob(old)?, self.read_blob(new)?);
+        if crate::diff::is_binary(&o) || crate::diff::is_binary(&n) {
+            return Ok(None);
+        }
+        Ok(match (String::from_utf8(o), String::from_utf8(n)) {
+            (Ok(o), Ok(n)) => Some((o, n)),
+            _ => None,
+        })
+    }
+
     /// Every tracked change under `spec` that `add -p` can offer.
     pub fn patch_candidates(&self, spec: &Pathspec) -> Result<Vec<FilePatch>> {
         let changes = self.worktree_changes()?;

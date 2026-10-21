@@ -196,7 +196,12 @@ pub fn is_test_path(path: &str) -> bool {
         || file.contains(".test.")
         || file.contains(".spec.")
         || file.contains("_spec.")
-        || (original_file.ends_with(".java") && (original_file.starts_with("Test") || original_file.contains("Test.")))
+        // JVM, .NET, Swift and PHP conventions: `TestUser.java`, `UserTest.kt`, `UserTests.cs`, `UserSpec.scala`.
+        || ([".java", ".kt", ".scala", ".cs", ".swift", ".php"].iter().any(|e| original_file.ends_with(e))
+            && (original_file.starts_with("Test")
+                || original_file.contains("Test.")
+                || original_file.contains("Tests.")
+                || original_file.contains("Spec.")))
 }
 
 /// The path without its extension, and with index-like file names folded into their directory
@@ -304,7 +309,97 @@ pub fn import_resolves_to(lang: Lang, importer: &str, import: &veyra_semantic::I
                 import.names.iter().any(|n| ends_with_segments(&stem, &format!("{base}/{n}")))
             }
         }
+        Lang::Kotlin | Lang::Scala => {
+            // Like Java, except that a lower-case name is a top-level function or value, which
+            // can live in any file of the package.
+            let base = module.replace('.', "/");
+            if import.names.is_empty() {
+                ends_with_segments(dir_of(target), &base)
+            } else {
+                import.names.iter().any(|n| {
+                    ends_with_segments(&stem, &format!("{base}/{n}"))
+                        || (n.starts_with(char::is_lowercase) && ends_with_segments(dir_of(target), &base))
+                })
+            }
+        }
+        Lang::C | Lang::Cpp => {
+            // `#include "x.h"`: next to the includer, or below an include directory.
+            module == target
+                || join_relative(dir_of(importer), module) == target
+                || target.ends_with(&format!("/{module}"))
+        }
+        Lang::CSharp => {
+            // Namespaces usually mirror directories, often without the root namespace.
+            let segs: Vec<&str> = module.split('.').collect();
+            let dir = dir_of(target);
+            let shortest = segs.len().min(2);
+            (0..segs.len())
+                .any(|skip| segs.len() - skip >= shortest && ends_with_segments(dir, &segs[skip..].join("/")))
+        }
+        Lang::Ruby => {
+            if module.starts_with('.') {
+                join_relative(dir_of(importer), module) == stem
+            } else {
+                ends_with_segments(&stem, module)
+            }
+        }
+        Lang::Php => {
+            if module.contains('/') || module.ends_with(".php") {
+                join_relative(dir_of(importer), module) == target || ends_with_segments(target, module)
+            } else {
+                // PSR-4: `App\Models\User` lives in `app/Models/User.php` or `src/Models/User.php`.
+                let base = module.replace('\\', "/");
+                import.names.iter().any(|n| {
+                    let full = format!("{base}/{n}");
+                    let below_root = full.split_once('/').map(|(_, rest)| rest).unwrap_or(&full);
+                    ends_with_segments(&stem, &full) || ends_with_segments(&stem, below_root)
+                })
+            }
+        }
+        Lang::Swift => {
+            // A module is a target: `Sources/<Module>/…`.
+            let name = module.split('.').next().unwrap_or(module);
+            target.starts_with(&format!("Sources/{name}/")) || target.contains(&format!("/Sources/{name}/"))
+        }
+        Lang::Bash => {
+            // `source "$DIR/lib.sh"`: drop a leading variable.
+            let module = if module.starts_with('$') { module.split_once('/').map_or("", |(_, r)| r) } else { module };
+            let module = module.trim_start_matches("./");
+            !module.is_empty()
+                && (join_relative(dir_of(importer), module) == target
+                    || module == target
+                    || target.ends_with(&format!("/{module}")))
+        }
+        Lang::Lua => {
+            let path = module.replace('.', "/");
+            ends_with_segments(&stem, &path) || stem.strip_suffix("/init").is_some_and(|s| ends_with_segments(s, &path))
+        }
+        Lang::Elixir => {
+            // `Acme.UserRepo` lives in `lib/acme/user_repo.ex`.
+            let path = module.split('.').map(snake_case).collect::<Vec<_>>().join("/");
+            ends_with_segments(&stem, &path)
+                || import.names.iter().any(|n| ends_with_segments(&stem, &format!("{path}/{}", snake_case(n))))
+        }
     }
+}
+
+/// `UserRepo` → `user_repo`, `HTTPClient` → `http_client` (Elixir's `Macro.underscore`).
+fn snake_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            let prev = i.checked_sub(1).map(|p| chars[p]);
+            let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if prev.is_some_and(|p| p.is_lowercase() || p.is_ascii_digit() || (p.is_uppercase() && next_lower)) {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// `crates/foo/src/a/b.rs` → `crates/foo/src`.
@@ -769,6 +864,57 @@ mod tests {
             &imp("com.acme.util", &["Strings"]),
             "src/main/java/com/acme/util/Strings.java"
         ));
+    }
+
+    #[test]
+    fn resolution_in_more_languages() {
+        let r = import_resolves_to;
+        // C/C++ includes: relative to the includer, or below an include directory.
+        assert!(r(Lang::C, "src/main.c", &imp("util.h", &[]), "src/util.h"));
+        assert!(r(Lang::Cpp, "src/app/main.cpp", &imp("geo/shape.hpp", &[]), "include/geo/shape.hpp"));
+        assert!(!r(Lang::C, "src/main.c", &imp("stdio.h", &[]), "src/util.h"));
+        // C#: namespace ↔ directory, with or without the root namespace.
+        assert!(r(Lang::CSharp, "Api/Program.cs", &imp("Acme.Core.Models", &[]), "Core/Models/User.cs"));
+        assert!(!r(Lang::CSharp, "Api/Program.cs", &imp("Acme.Core.Models", &[]), "Other/User.cs"));
+        // Ruby.
+        assert!(r(Lang::Ruby, "app/main.rb", &imp("./models/user", &[]), "app/models/user.rb"));
+        assert!(r(Lang::Ruby, "bin/run.rb", &imp("acme/billing", &[]), "lib/acme/billing.rb"));
+        // PHP: PSR-4 namespaces and include paths.
+        assert!(r(Lang::Php, "app/Http/C.php", &imp("App\\Models", &["User"]), "app/Models/User.php"));
+        assert!(r(Lang::Php, "src/a.php", &imp("App\\Models", &["User"]), "src/Models/User.php"));
+        assert!(r(Lang::Php, "public/index.php", &imp("../lib/helpers.php", &[]), "lib/helpers.php"));
+        // Kotlin / Scala: classes by name, top-level functions by package.
+        assert!(r(
+            Lang::Kotlin,
+            "a/App.kt",
+            &imp("com.acme.models", &["User"]),
+            "src/main/kotlin/com/acme/models/User.kt"
+        ));
+        assert!(r(
+            Lang::Kotlin,
+            "a/App.kt",
+            &imp("com.acme.util", &["slugify"]),
+            "src/main/kotlin/com/acme/util/Strings.kt"
+        ));
+        assert!(!r(
+            Lang::Kotlin,
+            "a/App.kt",
+            &imp("com.acme.models", &["User"]),
+            "src/main/kotlin/com/acme/models/Team.kt"
+        ));
+        assert!(r(Lang::Scala, "a/App.scala", &imp("com.acme", &["Repo"]), "src/main/scala/com/acme/Repo.scala"));
+        // Swift modules are package targets.
+        assert!(r(Lang::Swift, "Sources/App/main.swift", &imp("Networking", &[]), "Sources/Networking/Client.swift"));
+        assert!(!r(Lang::Swift, "Sources/App/main.swift", &imp("Foundation", &[]), "Sources/Networking/Client.swift"));
+        // Bash, Lua, Elixir.
+        assert!(r(Lang::Bash, "scripts/deploy.sh", &imp("./lib/common.sh", &[]), "scripts/lib/common.sh"));
+        assert!(r(Lang::Bash, "scripts/deploy.sh", &imp("$DIR/lib/common.sh", &[]), "scripts/lib/common.sh"));
+        assert!(r(Lang::Lua, "main.lua", &imp("lib.util", &[]), "lib/util.lua"));
+        assert!(r(Lang::Lua, "main.lua", &imp("lib", &[]), "lib/init.lua"));
+        assert!(r(Lang::Elixir, "lib/acme/web.ex", &imp("Acme.UserRepo", &[]), "lib/acme/user_repo.ex"));
+        assert!(r(Lang::Elixir, "lib/acme/web.ex", &imp("Acme", &["HTTPClient"]), "lib/acme/http_client.ex"));
+        assert_eq!(snake_case("HTTPClient"), "http_client");
+        assert_eq!(snake_case("UserRepo2"), "user_repo2");
     }
 
     #[test]

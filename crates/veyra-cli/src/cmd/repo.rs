@@ -471,6 +471,7 @@ pub fn commit(ctx: &Ctx, args: CommitArgs) -> Result<()> {
     let request =
         CommitRequest { message, amend: args.amend, allow_empty: args.allow_empty, trailers, author: None, sign };
     let parent_tree = repo.head_tree_id()?;
+    let previous_head = repo.head_commit_id()?;
     let id = if picking {
         // Finishing a stopped cherry-pick/revert keeps the original author, like git.
         repo.continue_pick(Some(veyra_core::commit::add_trailers(&request.message, &request.trailers)))?
@@ -485,6 +486,12 @@ pub fn commit(ctx: &Ctx, args: CommitArgs) -> Result<()> {
         format!("{} {} {}", if args.amend { "amend" } else { "commit" }, veyra_core::short(&id), info.summary());
     tx.commit(&summary)?;
     if let Some(err) = repo.run_post_hook("post-commit", &[]) {
+        ui::warn(&err);
+    }
+    if args.amend
+        && let Some(old) = previous_head
+        && let Some(err) = repo.run_post_hook_with_input("post-rewrite", &["amend"], format!("{old} {id}\n").as_bytes())
+    {
         ui::warn(&err);
     }
 

@@ -606,7 +606,7 @@ fn human(bytes: u64) -> String {
     }
 }
 
-pub fn doctor(ctx: &Ctx) -> Result<()> {
+pub fn doctor(ctx: &Ctx, full: bool) -> Result<()> {
     let repo = ctx.repo()?;
     let mut checks: Vec<Check> = Vec::new();
 
@@ -640,8 +640,10 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
             match repo.log(&tips, Some(20_000)) {
                 Ok(commits) => {
                     walked = commits.len();
+                    // A partial clone with a tree filter leaves trees on the promisor remote.
+                    let partial = repo.is_partial();
                     for c in &commits {
-                        if !repo.git().has_object(c.tree) {
+                        if !partial && !repo.git().has_object(c.tree) {
                             problems.push(format!(
                                 "commit {} references missing tree {}",
                                 veyra_core::short(&c.id),
@@ -673,6 +675,41 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
                 level: Level::Fail,
                 evidence: problems.join("; "),
                 fix: Some("git fsck --full   (then restore missing objects from a remote or backup)".into()),
+            }
+        });
+    }
+
+    // Objects (--full): every object rehashed and parsed, pack checksums, full connectivity.
+    if full {
+        let report = repo.fsck()?;
+        let mut evidence = format!(
+            "{} rehashed, {} verified, {} reachable",
+            plural(report.objects, "object"),
+            plural(report.packs, "pack"),
+            report.reachable
+        );
+        if report.promised > 0 {
+            evidence.push_str(&format!(", {} on the promisor remote (partial clone)", report.promised));
+        }
+        checks.push(if report.is_ok() {
+            Check { name: "Objects", level: Level::Pass, evidence, fix: None }
+        } else {
+            let mut problems: Vec<String> = Vec::new();
+            problems.extend(report.bad_packs.iter().map(|p| format!("bad pack {p}")));
+            problems.extend(report.corrupt.iter().map(|c| format!("corrupt {c}")));
+            problems.extend(report.missing.iter().map(|m| format!("missing {m}")));
+            let total = problems.len();
+            let mut shown = problems.into_iter().take(5).collect::<Vec<_>>().join("; ");
+            if total > 5 {
+                shown.push_str(&format!("; and {} more", total - 5));
+            }
+            Check {
+                name: "Objects",
+                level: Level::Fail,
+                evidence: format!("{evidence}; {shown}"),
+                fix: Some(
+                    "restore the objects from a remote (`veyra fetch`) or a backup; `git fsck --full` agrees".into(),
+                ),
             }
         });
     }

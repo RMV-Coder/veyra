@@ -61,6 +61,10 @@ pub enum Command {
         /// Short format (`XY path`).
         #[arg(short, long)]
         short: bool,
+        /// Git's stable script format (`--porcelain` / `--porcelain=v1`): the short format,
+        /// paths relative to the repository root, never colored.
+        #[arg(long, value_name = "VERSION", num_args = 0..=1, default_missing_value = "v1", require_equals = true)]
+        porcelain: Option<String>,
     },
 
     // ----- staging & committing -----
@@ -480,7 +484,12 @@ pub enum Command {
         no_open: bool,
     },
     /// Check repository health.
-    Doctor,
+    Doctor {
+        /// Also read back and rehash every object, verify pack checksums and check that
+        /// everything reachable exists (like `git fsck --full`; slower).
+        #[arg(long)]
+        full: bool,
+    },
     /// What a change can affect: dependents, tests to run, co-changed files and risk, with evidence.
     Impact(ImpactArgs),
     /// Scan for committed or staged secrets.
@@ -751,7 +760,7 @@ pub struct CommitArgs {
     /// Let the configured AI propose the message (you approve or edit it).
     #[arg(long, conflicts_with_all = ["message", "file", "amend", "split"])]
     pub smart: bool,
-    /// Let the configured AI propose splitting the staged files into several commits.
+    /// Let the configured AI propose splitting the staged change (by file or by hunk) into several commits.
     #[arg(long, conflicts_with_all = ["message", "file", "amend"])]
     pub split: bool,
     /// With --smart/--split: show what would be sent to the AI, send nothing.
@@ -900,6 +909,16 @@ pub struct AnalyzeArgs {
     /// Exit with an error if there is a finding at this severity or above (high, medium, low).
     #[arg(long, value_name = "SEVERITY")]
     pub fail_on: Option<String>,
+    /// Trust the `[[plugin]]` with this id in .veyra/analyzers.toml, exactly as it is defined
+    /// now, so it runs here (repeatable). A later change to its definition needs trusting again.
+    #[arg(long, value_name = "ID")]
+    pub trust_plugin: Vec<String>,
+    /// Stop trusting a plugin.
+    #[arg(long, value_name = "ID")]
+    pub revoke_plugin: Vec<String>,
+    /// Don't run any plugins.
+    #[arg(long)]
+    pub no_plugins: bool,
 }
 
 #[derive(Args, Debug)]

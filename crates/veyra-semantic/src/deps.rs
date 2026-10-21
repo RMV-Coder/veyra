@@ -32,7 +32,8 @@ fn named<'t>(node: Node<'t>) -> Vec<Node<'t>> {
 /// Identifiers anywhere below `node`.
 fn idents_below(node: Node<'_>, source: &str, out: &mut Vec<String>) {
     if node.child_count() == 0 {
-        if node.kind().contains("identifier") {
+        // PHP calls identifiers `name`, Ruby has `constant`s, Elixir `alias`es, Bash `word`s.
+        if node.kind().contains("identifier") || matches!(node.kind(), "name" | "constant" | "alias" | "word") {
             out.push(text(node, source).to_owned());
         }
         return;
@@ -149,6 +150,152 @@ fn collect(lang: Lang, node: Node<'_>, source: &str, out: &mut Vec<Import>) {
             }
             return;
         }
+        (Lang::C | Lang::Cpp, "preproc_include") => {
+            if let Some(path) = field(node, "path") {
+                push(path.trim().trim_matches(|c| c == '"' || c == '<' || c == '>').to_owned(), Vec::new());
+            }
+            return;
+        }
+        (Lang::CSharp, "using_directive") => {
+            // `using A.B;`, `global using A.B;`, `using static A.B;`, `using X = A.B;`
+            let t = text(node, source).trim().trim_end_matches(';').trim();
+            let t = t.strip_prefix("global").map(str::trim_start).unwrap_or(t);
+            let t = t.strip_prefix("using").map(str::trim_start).unwrap_or(t);
+            let t = t.strip_prefix("static ").unwrap_or(t);
+            push(t.split_once('=').map(|(_, m)| m).unwrap_or(t).trim().to_owned(), Vec::new());
+            return;
+        }
+        (Lang::Ruby, "call") => {
+            let method = field(node, "method").unwrap_or_default();
+            if matches!(method.as_str(), "require" | "require_relative" | "load")
+                && node.child_by_field_name("receiver").is_none()
+                && let Some(args) = node.child_by_field_name("arguments")
+                && let Some(first) = named(args).into_iter().next().filter(|a| a.kind() == "string")
+            {
+                let path = unquote(text(first, source));
+                let relative = method == "require_relative" && !path.starts_with('.');
+                push(if relative { format!("./{path}") } else { path }, Vec::new());
+                return;
+            }
+        }
+        (Lang::Php, "namespace_use_declaration") => {
+            // `use A\B\C;`, `use A\B\C as D;`, `use A\B\{C, D};`
+            let group = node.child_by_field_name("body");
+            let prefix = named(node).into_iter().find(|c| c.kind() == "namespace_name").map(|n| text(n, source));
+            let clauses = group.map(named).unwrap_or_else(|| named(node));
+            for clause in clauses.into_iter().filter(|c| c.kind() == "namespace_use_clause") {
+                let Some(name) = named(clause).into_iter().find(|c| matches!(c.kind(), "qualified_name" | "name"))
+                else {
+                    continue;
+                };
+                let full = match prefix.filter(|_| group.is_some()) {
+                    Some(prefix) => format!("{prefix}\\{}", text(name, source)),
+                    None => text(name, source).to_owned(),
+                };
+                let full = full.trim_start_matches('\\');
+                match full.rsplit_once('\\') {
+                    Some((module, last)) => push(module.to_owned(), vec![last.to_owned()]),
+                    None => push(full.to_owned(), Vec::new()),
+                }
+            }
+            return;
+        }
+        (
+            Lang::Php,
+            "require_expression" | "require_once_expression" | "include_expression" | "include_once_expression",
+        ) => {
+            if let Some(s) = named(node).into_iter().find(|c| matches!(c.kind(), "string" | "encapsed_string")) {
+                push(unquote(text(s, source)), Vec::new());
+            }
+            return;
+        }
+        (Lang::Kotlin, "import") => {
+            let path = text(node, source).trim().trim_start_matches("import").trim().trim_end_matches(';');
+            let path = path.split(" as ").next().unwrap_or(path).trim();
+            match path.strip_suffix(".*") {
+                Some(module) => push(module.to_owned(), Vec::new()),
+                None => match path.rsplit_once('.') {
+                    Some((module, last)) => push(module.to_owned(), vec![last.to_owned()]),
+                    None => push(path.to_owned(), Vec::new()),
+                },
+            }
+            return;
+        }
+        (Lang::Swift, "import_declaration") => {
+            if let Some(id) = named(node).into_iter().find(|c| c.kind() == "identifier") {
+                push(text(id, source).to_owned(), Vec::new());
+            }
+            return;
+        }
+        (Lang::Scala, "import_declaration") => {
+            let mut cursor = node.walk();
+            let path: Vec<&str> = node
+                .children_by_field_name("path", &mut cursor)
+                .filter(|p| p.is_named())
+                .map(|p| text(p, source))
+                .collect();
+            let selectors = named(node).into_iter().find(|c| c.kind() == "namespace_selectors");
+            let wildcard = named(node).into_iter().any(|c| c.kind() == "namespace_wildcard");
+            match (selectors, path.split_last()) {
+                (Some(selectors), _) => {
+                    let mut names = Vec::new();
+                    idents_below(selectors, source, &mut names);
+                    push(path.join("."), names);
+                }
+                (None, Some((last, init))) if !wildcard && !init.is_empty() => {
+                    push(init.join("."), vec![(*last).to_owned()]);
+                }
+                _ => push(path.join("."), Vec::new()),
+            }
+            return;
+        }
+        (Lang::Bash, "command") => {
+            let name = field(node, "name").unwrap_or_default();
+            if (name == "source" || name == ".")
+                && let Some(arg) = node.child_by_field_name("argument")
+            {
+                push(unquote(text(arg, source)), Vec::new());
+                return;
+            }
+        }
+        (Lang::Lua, "function_call") => {
+            if field(node, "name").as_deref() == Some("require")
+                && let Some(args) = node.child_by_field_name("arguments")
+            {
+                // `require("x")` or `require "x"`
+                let string = if args.kind() == "string" {
+                    Some(args)
+                } else {
+                    named(args).into_iter().find(|a| a.kind() == "string")
+                };
+                if let Some(s) = string {
+                    push(unquote(text(s, source)), Vec::new());
+                }
+                return;
+            }
+        }
+        (Lang::Elixir, "call") => {
+            let target = field(node, "target").unwrap_or_default();
+            if matches!(target.as_str(), "alias" | "import" | "require" | "use")
+                && let Some(args) = named(node).into_iter().find(|c| c.kind() == "arguments")
+                && let Some(first) = named(args).into_iter().next()
+            {
+                // `alias A.B` or `alias A.{B, C}`
+                let module = text(first, source);
+                match module.split_once(".{") {
+                    Some((base, list)) => push(
+                        base.to_owned(),
+                        list.trim_end_matches('}')
+                            .split(',')
+                            .map(|n| n.trim().to_owned())
+                            .filter(|n| !n.is_empty())
+                            .collect(),
+                    ),
+                    None => push(module.to_owned(), Vec::new()),
+                }
+                return;
+            }
+        }
         _ => {}
     }
     for child in named(node) {
@@ -204,6 +351,82 @@ mod tests {
         assert_eq!(
             mods(Lang::Java, "import java.util.List;\nimport static a.B.c;\n"),
             vec![("java.util".into(), vec!["List".into()]), ("a.B".into(), vec!["c".into()])]
+        );
+    }
+
+    #[test]
+    fn imports_in_more_languages() {
+        let none = Vec::<String>::new;
+        assert_eq!(
+            mods(Lang::C, "#include <stdio.h>\n#include \"util/str.h\"\n"),
+            vec![("stdio.h".into(), none()), ("util/str.h".into(), none())]
+        );
+        assert_eq!(
+            mods(
+                Lang::CSharp,
+                "using System;\nglobal using Acme.Models;\nusing static Acme.Util;\nusing J = Newtonsoft.Json;\n"
+            ),
+            vec![
+                ("System".into(), none()),
+                ("Acme.Models".into(), none()),
+                ("Acme.Util".into(), none()),
+                ("Newtonsoft.Json".into(), none())
+            ]
+        );
+        assert_eq!(
+            mods(Lang::Ruby, "require 'json'\nrequire_relative 'models/user'\nobj.require('x')\n"),
+            vec![("json".into(), none()), ("./models/user".into(), none())]
+        );
+        assert_eq!(
+            mods(
+                Lang::Php,
+                "<?php\nuse App\\Models\\User;\nuse App\\Support\\{Str, Arr};\nrequire_once 'lib/helpers.php';\n"
+            ),
+            vec![
+                ("App\\Models".into(), vec!["User".into()]),
+                ("App\\Support".into(), vec!["Str".into()]),
+                ("App\\Support".into(), vec!["Arr".into()]),
+                ("lib/helpers.php".into(), none())
+            ]
+        );
+        assert_eq!(
+            mods(Lang::Kotlin, "import com.acme.models.User\nimport kotlinx.coroutines.*\nimport a.b.c as d\n"),
+            vec![
+                ("com.acme.models".into(), vec!["User".into()]),
+                ("kotlinx.coroutines".into(), none()),
+                ("a.b".into(), vec!["c".into()])
+            ]
+        );
+        assert_eq!(
+            mods(Lang::Swift, "import Foundation\nimport UIKit\n"),
+            vec![("Foundation".into(), none()), ("UIKit".into(), none())]
+        );
+        assert_eq!(
+            mods(Lang::Scala, "import scala.collection.mutable\nimport com.acme.{User, Team}\nimport a.b._\n"),
+            vec![
+                ("scala.collection".into(), vec!["mutable".into()]),
+                ("com.acme".into(), vec!["User".into(), "Team".into()]),
+                ("a.b".into(), none())
+            ]
+        );
+        assert_eq!(
+            mods(Lang::Bash, "source ./lib/common.sh\n. env.sh\necho source\n"),
+            vec![("./lib/common.sh".into(), none()), ("env.sh".into(), none())]
+        );
+        assert_eq!(
+            mods(Lang::Lua, "local json = require(\"json\")\nlocal util = require \"lib.util\"\n"),
+            vec![("json".into(), none()), ("lib.util".into(), none())]
+        );
+        assert_eq!(
+            mods(
+                Lang::Elixir,
+                "defmodule A do\n  alias Acme.Repo\n  alias Acme.{User, Team}\n  import Ecto.Query\nend\n"
+            ),
+            vec![
+                ("Acme.Repo".into(), none()),
+                ("Acme".into(), vec!["User".into(), "Team".into()]),
+                ("Ecto.Query".into(), none())
+            ]
         );
     }
 

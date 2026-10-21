@@ -62,7 +62,8 @@ to `git`, and the conformance suite covers every Phase 1–2 command on all thre
 - [x] SHA-256 repositories (`init --object-format sha256`)
 - [x] Performance budgets: `cargo test --release -p veyra-cli --test perf -- --ignored` (10k files).
       New blobs are written as packs instead of thousands of loose files.
-- [ ] Partial-clone object filters (`--filter=blob:none`) once gitoxide exposes them
+- [x] Partial-clone object filters (`--filter=blob:none`, `blob:limit`, `tree:`), driven by Veyra on
+      gitoxide's transport, with on-demand fetching of missing objects (1.3)
 
 **Exit criterion:** met. Signed history verifies in both Git and Veyra, and the 10k-file budgets pass.
 
@@ -77,9 +78,9 @@ to `git`, and the conformance suite covers every Phase 1–2 command on all thre
 - [x] `impact [--staged | --commit | --branch] [--tests]`: import resolution per language, name
       references, test mapping, co-change history, risk with reasons, limitations reported
 - [x] `merge resolutions` (rerere) in Git's rr-cache format
-- [ ] C/C++ grammars
+- [x] C, C++, C#, Ruby, PHP, Kotlin, Swift, Scala, Bash, Lua and Elixir grammars (1.3)
 
-**Exit criterion:** met for the six languages. False-equivalence guards: "reformatted" requires an
+**Exit criterion:** met (for the original six languages; eleven more were added in 1.3). False-equivalence guards: "reformatted" requires an
 identical token sequence *and* tree shape (so re-indenting Python is a change), renames require a
 token-identical, non-trivial body, and structural merges refuse anything they can't verify.
 
@@ -96,7 +97,7 @@ token-identical, non-trivial body, and structural merges refuse anything they ca
 - [x] Migration and IaC analyzers (`analyze --migration / --infra`), extensible with repository rules
       in `.veyra/analyzers.toml`
 - [x] AI-proposed intents (`intent suggest`): guards that don't hold are dropped; a human accepts
-- [ ] Hunk-level `commit --split`; out-of-process analyzer plugins
+- [x] Hunk-level `commit --split`; out-of-process analyzer plugins with local trust (1.3)
 
 **Exit criterion:** met. Every AI feature degrades to "AI features are off" with no side effects,
 proposals are validated deterministically, and nothing changes history without explicit approval
@@ -115,8 +116,8 @@ proposals are validated deterministically, and nothing changes history without e
       attestations), install scripts that verify both, Homebrew and winget manifests
 - [x] [COMPATIBILITY.md](COMPATIBILITY.md) and the 1.x [STABILITY.md](STABILITY.md) promise for CLI
       flags, `--json` output, the journal format and committed policy files
-- [ ] Publish the documentation as a site; submit the Homebrew and winget manifests after the first
-      tagged release
+- [x] The documentation as an mdBook site, published to GitHub Pages by `.github/workflows/docs.yml` (1.3)
+- [ ] Submit the Homebrew and winget manifests
 
 **Exit criterion:** met for 1.0.
 
@@ -124,7 +125,11 @@ proposals are validated deterministically, and nothing changes history without e
 
 - [x] `veyra serve`: local read-only viewer (1.2)
 - [x] Pull-request review action (1.2)
+- [x] Rebase, bisect and cherry-pick/revert sequences shared with Git (1.3)
+- [x] Partial and shallow clones, merge strategies, non-cone sparse patterns, `doctor --full`,
+      Git LFS coverage, `pre-rebase` / `post-rewrite` hooks (1.3)
+- [x] Eleven more languages, hunk-level `commit --split`, analyzer plugins, documentation site (1.3)
 
-- Partial clone (`--filter=blob:none`) and reftable, as gitoxide adds them
-- Hunk-level `commit --split`; out-of-process analyzer plugins
-- C/C++ grammars for the semantic tools
+- Reftable, once gitoxide reads it (until then Veyra refuses reftable repositories with the
+  `git refs migrate` fix)
+- CI results on Linux and macOS, then dropping the beta label

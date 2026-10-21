@@ -1538,7 +1538,7 @@ fn fake_ai(env: &Env) -> PathBuf {
 input=$(cat)
 printf '%s\n----\n' "$input" >> "LOG"
 case "$input" in
-  *staged_files*) printf '%s
+  *change_units*) printf '%s
 ' '{"commits":[{"message":"feat: add a","files":["a.txt"]},{"message":"docs: add b","files":["b.txt"]}]}' ;;
   *conflicted_file*) printf '%s
 ' '{"resolved":"start\nmain and topic\nend\n","confidence":"CONF","explanation":"Kept both."}' ;;
@@ -2569,4 +2569,301 @@ fn non_cone_sparse_patterns_agree_with_git() {
     let mut now = worktree_files(&env.repo);
     now.retain(|f| f != "docs/guide.md");
     assert_eq!(now, expected);
+}
+
+fn doctor_objects_check(env: &Env, dir: &std::path::Path) -> (bool, serde_json::Value) {
+    let out = env.veyra(&["doctor", "--full", "--json"]).current_dir(dir).output().unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let check = doc["checks"].as_array().unwrap().iter().find(|c| c["name"] == "Objects").unwrap().clone();
+    (out.status.success(), check)
+}
+
+/// Make a stored object file writable (Git stores them read-only).
+fn writable(path: &std::path::Path) {
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(path, perms).unwrap();
+}
+
+#[test]
+fn doctor_full_finds_corrupt_and_missing_objects() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "alpha\n", "one");
+    env.commit_file("b.txt", "beta\n", "two");
+    env.git(&["gc", "-q"]);
+    env.commit_file("c.txt", "gamma\n", "three");
+    let (ok, check) = doctor_objects_check(&env, &env.repo);
+    assert!(ok, "{check}");
+    assert_eq!(check["status"], "pass", "{check}");
+    // (`git gc` may also write a cruft pack.)
+    let evidence = check["evidence"].as_str().unwrap().to_owned();
+    assert!(!evidence.contains(" 0 packs") && evidence.contains("verified"), "{check}");
+
+    // A loose object whose content hashes to another id.
+    let blob = env.git(&["rev-parse", "HEAD:c.txt"]).trim().to_owned();
+    let commit = env.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    let loose = |id: &str| env.repo.join(".git/objects").join(&id[..2]).join(&id[2..]);
+    let original = std::fs::read(loose(&blob)).unwrap();
+    writable(&loose(&blob));
+    std::fs::copy(loose(&commit), loose(&blob)).unwrap();
+    let (ok, check) = doctor_objects_check(&env, &env.repo);
+    assert!(!ok);
+    assert_eq!(check["status"], "fail");
+    let evidence = check["evidence"].as_str().unwrap();
+    assert!(evidence.contains(&format!("corrupt {blob}: content hashes to {commit}")), "{evidence}");
+    let mut fsck = Command::new("git");
+    env.apply(&mut fsck);
+    assert!(!fsck.current_dir(&env.repo).args(["fsck", "--full"]).output().unwrap().status.success());
+
+    // A reachable object that's gone.
+    std::fs::remove_file(loose(&blob)).unwrap();
+    let (ok, check) = doctor_objects_check(&env, &env.repo);
+    assert!(!ok);
+    assert!(check["evidence"].as_str().unwrap().contains(&format!("missing {blob}")), "{check}");
+    std::fs::write(loose(&blob), &original).unwrap();
+    assert!(doctor_objects_check(&env, &env.repo).0);
+
+    // A damaged pack.
+    let pack = std::fs::read_dir(env.repo.join(".git/objects/pack"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "pack"))
+        .unwrap();
+    let mut bytes = std::fs::read(&pack).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0xff;
+    writable(&pack);
+    std::fs::write(&pack, &bytes).unwrap();
+    let (ok, check) = doctor_objects_check(&env, &env.repo);
+    assert!(!ok);
+    assert!(check["evidence"].as_str().unwrap().contains("bad pack"), "{check}");
+}
+
+#[test]
+fn doctor_full_accepts_objects_a_partial_clone_left_behind() {
+    require_git!();
+    let env = Env::new();
+    let (_src, url) = filterable_source(&env);
+    let dest = env.home.join("partial");
+    env.ok(&["clone", "--filter=blob:none", &url, dest.to_str().unwrap()]);
+    let (ok, check) = doctor_objects_check(&env, &dest);
+    assert!(ok, "{check}");
+    assert!(check["evidence"].as_str().unwrap().contains("on the promisor remote"), "{check}");
+
+    // A tree filter leaves older trees behind too; that's not a broken repository either.
+    let trees = env.home.join("treeless");
+    env.ok(&["clone", "--filter=tree:0", &url, trees.to_str().unwrap()]);
+    assert_eq!(std::fs::read_to_string(trees.join("docs/guide.txt")).unwrap(), "docs 4\n");
+    let (ok, check) = doctor_objects_check(&env, &trees);
+    assert!(ok, "{check}");
+    // Older trees arrive when history needs them.
+    assert!(!has_object_locally(&env, &trees, "HEAD~3^{tree}"));
+    let diff = env.veyra(&["diff", "--name-only", "HEAD~3", "HEAD"]).current_dir(&trees).output().unwrap();
+    assert!(diff.status.success(), "{}", String::from_utf8_lossy(&diff.stderr));
+    assert_eq!(String::from_utf8_lossy(&diff.stdout), "app/main.txt\ndocs/guide.txt\n");
+    git_in(&env, &trees, &["fsck", "--no-dangling"]);
+}
+
+#[test]
+fn reftable_repositories_are_refused_with_the_way_out() {
+    require_git!();
+    let env = Env::new();
+    let dir = env.home.join("reftable");
+    let mut init = Command::new("git");
+    env.apply(&mut init);
+    let made = init.args(["init", "-q", "--ref-format=reftable"]).arg(&dir).output().unwrap();
+    if !made.status.success() {
+        eprintln!("skipping: this git can't create reftable repositories");
+        return;
+    }
+    env.veyra(&["status"]).current_dir(&dir).assert().failure().stderr(
+        predicate::str::contains("reftable").and(predicate::str::contains("git refs migrate --ref-format=files")),
+    );
+    git_in(&env, &dir, &["refs", "migrate", "--ref-format=files"]);
+    env.veyra(&["status"]).current_dir(&dir).assert().success();
+}
+
+fn git_lfs_available() -> bool {
+    Command::new("git").args(["lfs", "version"]).output().is_ok_and(|o| o.status.success())
+}
+
+#[test]
+fn git_lfs_files_round_trip_through_veyra() {
+    require_git!();
+    if !git_lfs_available() {
+        eprintln!("skipping: git-lfs not installed");
+        return;
+    }
+    let env = Env::new();
+    // Filters go in the (test) global config so the clone below has them too; hooks go here.
+    env.git(&["lfs", "install"]);
+    env.git(&["lfs", "track", "*.bin"]);
+    env.ok(&["add", ".gitattributes"]);
+    env.write("asset.bin", "binary payload\n");
+    env.ok(&["add", "asset.bin"]);
+    env.ok(&["commit", "-m", "lfs asset"]);
+    let stored = env.git(&["cat-file", "-p", "HEAD:asset.bin"]);
+    assert!(stored.starts_with("version https://git-lfs.github.com/spec/v1"), "stored as a pointer: {stored}");
+    assert!(env.git(&["lfs", "ls-files"]).contains("asset.bin"));
+    assert_eq!(env.ok(&["status", "--porcelain"]), "");
+    env.assert_git_clean_and_valid();
+
+    // Veyra's push runs the pre-push hook, which uploads the content.
+    let bare = env.home.join("remote.git");
+    git_in(&env, &env.home, &["init", "-q", "--bare", bare.to_str().unwrap()]);
+    env.ok(&["remote", "add", "origin", bare.to_str().unwrap()]);
+    env.ok(&["push", "-u", "origin", "main"]);
+    assert!(bare.join("lfs/objects").is_dir(), "the pre-push hook uploaded the LFS object");
+
+    // A fresh clone checks the real content out through the smudge filter.
+    let clone = env.home.join("clone");
+    env.ok(&["clone", bare.to_str().unwrap(), clone.to_str().unwrap()]);
+    assert_eq!(std::fs::read_to_string(clone.join("asset.bin")).unwrap(), "binary payload\n");
+    assert_eq!(git_in(&env, &clone, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn rewrite_hooks_run_like_git() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "a\n", "c1");
+    let old = env.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    install_hook(&env, "post-rewrite", "echo \"$1\" > .git/rewrite-args\ncat > .git/rewrite-input");
+    env.ok(&["commit", "--amend", "-m", "c1 amended"]);
+    let new = env.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    assert_eq!(std::fs::read_to_string(env.repo.join(".git/rewrite-args")).unwrap().trim(), "amend");
+    assert_eq!(std::fs::read_to_string(env.repo.join(".git/rewrite-input")).unwrap(), format!("{old} {new}\n"));
+
+    // pre-rebase can veto a rebase before anything changes.
+    env.ok(&["switch", "-c", "topic"]);
+    env.commit_file("t.txt", "t\n", "t");
+    env.ok(&["switch", "main"]);
+    env.commit_file("m.txt", "m\n", "m");
+    env.ok(&["switch", "topic"]);
+    let before = env.git(&["rev-parse", "HEAD"]);
+    install_hook(&env, "pre-rebase", "echo \"$1\" > .git/pre-rebase-args\nexit 1");
+    env.veyra(&["rebase", "main"]).assert().failure().stderr(predicate::str::contains("pre-rebase hook failed"));
+    assert_eq!(env.git(&["rev-parse", "HEAD"]), before);
+    assert_eq!(std::fs::read_to_string(env.repo.join(".git/pre-rebase-args")).unwrap().trim(), "main");
+    install_hook(&env, "pre-rebase", "exit 0");
+    env.ok(&["rebase", "main"]);
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn semantic_diff_and_impact_cover_more_languages() {
+    require_git!();
+    let env = Env::new();
+    env.write("include/geo.h", "#pragma once\nint area(int w, int h);\n");
+    env.write("src/geo.cpp", "#include \"geo.h\"\nint area(int w, int h) { return w * h; }\nint perimeter(int w, int h) { return 2 * (w + h); }\n");
+    env.write("src/main.c", "#include \"../include/geo.h\"\nint main(void) { return area(1, 2); }\n");
+    env.write("lib/billing.rb", "class Invoice\n  def total(a)\n    a\n  end\n\n  def due\n    1\n  end\nend\n");
+    env.ok(&["add", "."]);
+    env.ok(&["commit", "-m", "base"]);
+
+    env.write("src/geo.cpp", "#include \"geo.h\"\nint area(int w, int h) { return w * h * 1; }\nint perimeter(int w, int h) { return 2 * (w + h); }\n");
+    env.write(
+        "lib/billing.rb",
+        "class Invoice\n  def total(a, tax)\n    a + tax\n  end\n\n  def due\n    1\n  end\nend\n",
+    );
+    let out = env.ok(&["diff", "--semantic"]);
+    assert!(out.contains("function area"), "{out}");
+    assert!(!out.contains("perimeter"), "{out}");
+    assert!(out.contains("Invoice::total"), "{out}");
+    assert!(!out.contains("due"), "{out}");
+    let json: serde_json::Value = serde_json::from_str(&env.ok(&["diff", "--functions", "--json"])).unwrap();
+    let languages: Vec<&str> = json.as_array().unwrap().iter().filter_map(|f| f["language"].as_str()).collect();
+    assert!(languages.contains(&"C++") && languages.contains(&"Ruby"), "{json}");
+    env.ok(&["commit", "-am", "tweak"]);
+
+    // A header change reaches every file that includes it.
+    env.write("include/geo.h", "#pragma once\nint area(int w, int h, int scale);\n");
+    let out = env.ok(&["impact"]);
+    assert!(out.contains("src/main.c") && out.contains("src/geo.cpp"), "{out}");
+    assert!(out.contains("imports include/geo.h"), "{out}");
+}
+
+#[test]
+fn split_commit_can_split_one_file_by_hunk() {
+    require_git!();
+    let env = Env::new();
+    fake_ai(&env);
+    let lines: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    env.commit_file("a.txt", &lines, "init");
+    let changed = lines.replace("line 2\n", "line two\n").replace("line 19\n", "line nineteen\n");
+    env.write("a.txt", &changed);
+    env.write("b.txt", "b\n");
+    env.ok(&["add", "a.txt", "b.txt"]);
+    // This plan sends the second hunk of a.txt with b.txt, and the first hunk on its own.
+    let script = env.home.join("fake-ai.sh");
+    let s = std::fs::read_to_string(&script).unwrap();
+    let plan = r#"{"commits":[{"message":"fix: line two","changes":["a.txt#1"]},{"message":"feat: b and nineteen","changes":["b.txt","a.txt#2"]}]}"#;
+    let old_plan = s.lines().find(|l| l.contains("\"commits\"")).unwrap().to_owned();
+    std::fs::write(&script, s.replace(&old_plan, &format!("' '{plan}' ;;"))).unwrap();
+
+    let out = env.ok(&["commit", "--split", "--yes"]);
+    assert!(out.contains("Proposed: 2 commits") && out.contains("a.txt#2"), "{out}");
+    assert_eq!(env.git(&["log", "--format=%s", "-2"]), "feat: b and nineteen\nfix: line two\n");
+    // The first commit has only the first hunk; the second completes the file.
+    let first = env.git(&["show", "HEAD~1:a.txt"]);
+    assert_eq!(first, lines.replace("line 2\n", "line two\n"));
+    assert_eq!(env.git(&["show", "--name-only", "--format=", "HEAD~1"]).trim(), "a.txt");
+    assert_eq!(env.git(&["show", "HEAD:a.txt"]), changed);
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn analyzer_plugins_run_only_once_trusted() {
+    require_git!();
+    let env = Env::new();
+    env.write(
+        "tools/plugin.sh",
+        "#!/bin/sh\ninput=$(cat)\nprintf '%s' \"$input\" > .git/plugin-input\ncase \"$input\" in\n  *TODO*) echo '{\"findings\":[{\"severity\":\"high\",\"rule\":\"todo\",\"path\":\"src/a.txt\",\"line\":2,\"message\":\"No TODOs in src\"}]}' ;;\n  *) echo '{\"findings\":[]}' ;;\nesac\n",
+    );
+    env.write(
+        ".veyra/analyzers.toml",
+        "[[plugin]]\nid = \"todo-check\"\ncommand = [\"sh\", \"tools/plugin.sh\"]\npaths = [\"src/**\"]\n",
+    );
+    env.write("src/a.txt", "one\n");
+    env.ok(&["add", "."]);
+    env.ok(&["commit", "-m", "base"]);
+    env.write("src/a.txt", "one\nTODO two\n");
+    env.write("docs/b.txt", "TODO elsewhere\n");
+    env.ok(&["add", "."]);
+
+    // Committed, but not trusted here: it doesn't run, and says how to trust it.
+    let out = env.veyra(&["analyze", "--fail-on", "high"]).output().unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("isn't trusted here") && stderr.contains("--trust-plugin todo-check"), "{stderr}");
+    assert!(!env.repo.join(".git/plugin-input").exists(), "the plugin never ran");
+
+    // Trusted: it runs on the files it asked for, and its findings count.
+    env.veyra(&["analyze", "--trust-plugin", "todo-check", "--fail-on", "high"]).assert().failure();
+    let input: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(env.repo.join(".git/plugin-input")).unwrap()).unwrap();
+    assert_eq!(input["version"], 1);
+    let sent: Vec<&str> = input["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap()).collect();
+    assert_eq!(sent, vec!["src/a.txt"], "only files matching its paths");
+    let json: serde_json::Value = serde_json::from_str(&env.ok(&["analyze", "--json"])).unwrap();
+    assert_eq!(json[0]["rule"], "todo-check/todo", "{json}");
+    assert_eq!(json[0]["area"], "plugin");
+
+    // A changed definition (say, from a pull) is not trusted until reviewed again.
+    env.write(
+        ".veyra/analyzers.toml",
+        "[[plugin]]\nid = \"todo-check\"\ncommand = [\"sh\", \"tools/plugin.sh\", \"--more\"]\npaths = [\"src/**\"]\n",
+    );
+    let out = env.veyra(&["analyze", "--json"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "[]");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("isn't trusted here"));
+    // And a broken trusted plugin fails --fail-on instead of passing silently.
+    env.write("tools/plugin.sh", "#!/bin/sh\nexit 3\n");
+    env.ok(&["analyze", "--trust-plugin", "todo-check", "--no-plugins"]);
+    let out = env.veyra(&["analyze", "--fail-on", "high"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("plugin todo-check failed (exit code 3)"));
 }

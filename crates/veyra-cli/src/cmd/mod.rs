@@ -27,7 +27,12 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
         Clone { url, directory, scope, sparse, depth, filter } => {
             repo::clone(ctx, &url, directory, scope, sparse, depth, filter)
         }
-        Status { short } => repo::status(ctx, short),
+        Status { short, porcelain } => {
+            if let Some(version) = porcelain.as_deref().filter(|v| *v != "v1" && *v != "1") {
+                anyhow::bail!("status --porcelain={version} isn't supported; use --porcelain (v1) or --json");
+            }
+            repo::status(ctx, short || porcelain.is_some())
+        }
         Add { paths, patch: true, .. } => repo::add_patch(ctx, paths),
         Add { paths, all, update, force, patch: false } => repo::add(ctx, paths, all, update, force),
         Rm { paths, cached, force, recursive } => repo::rm(ctx, paths, cached, force, recursive),
@@ -89,7 +94,7 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
         Unshelve { entry } => stash::run(ctx, crate::cli::StashCommand::Pop { entry, index: false }),
         Checkpoint(args) => safety::checkpoint(ctx, args),
         Explain { command } => crate::explain::run(ctx, &command),
-        Doctor => tools::doctor(ctx),
+        Doctor { full } => tools::doctor(ctx, full),
         Impact(args) => analysis::impact(ctx, args),
         Serve { port, no_open } => serve::serve(ctx, port, no_open),
         Analyze(args) => analysis::analyze(ctx, args),

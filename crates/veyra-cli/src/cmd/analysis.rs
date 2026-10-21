@@ -186,15 +186,17 @@ pub fn analyze(ctx: &Ctx, args: AnalyzeArgs) -> Result<()> {
     let files: Vec<ChangedFile<'_>> =
         contents.iter().map(|(p, o, n)| ChangedFile { path: p, old: o.as_deref(), new: n.as_deref() }).collect();
     let both = !args.migration && !args.infra;
-    let findings: Vec<_> = analyzer
+    let mut findings: Vec<_> = analyzer
         .analyze(&files)
         .into_iter()
         .filter(|f| match f.area {
             Area::Migration => both || args.migration,
             Area::Infra => both || args.infra,
-            Area::Custom => true,
+            Area::Custom | Area::Plugin => true,
         })
         .collect();
+    let plugins_failed = run_plugins(&repo, &analyzer, &args, &files, &mut findings)?;
+    findings.sort_by(|a, b| a.severity.cmp(&b.severity).then_with(|| a.path.cmp(&b.path)).then(a.line.cmp(&b.line)));
     if ctx.json {
         ui::json(&serde_json::to_value(&findings)?);
     } else if findings.is_empty() {
@@ -225,9 +227,75 @@ pub fn analyze(ctx: &Ctx, args: AnalyzeArgs) -> Result<()> {
         );
     }
     if let Some(t) = threshold
-        && findings.iter().any(|f| f.severity <= t)
+        && (plugins_failed || findings.iter().any(|f| f.severity <= t))
     {
         return Err(crate::Reported.into());
     }
     Ok(())
+}
+
+/// Where this user's plugin trust lives: the Git directory, never committed or cloned.
+fn plugin_trust_path(repo: &veyra_core::Repo) -> std::path::PathBuf {
+    repo.common_dir().join("veyra").join("trusted-plugins.json")
+}
+
+/// Run the trusted `[[plugin]]`s and add their findings; say why the others didn't run.
+/// Returns whether a trusted plugin failed (which fails `--fail-on`, so CI never passes silently).
+fn run_plugins(
+    repo: &veyra_core::Repo,
+    analyzer: &veyra_analyze::Analyzer,
+    args: &AnalyzeArgs,
+    files: &[veyra_analyze::ChangedFile<'_>],
+    findings: &mut Vec<veyra_analyze::Finding>,
+) -> Result<bool> {
+    use veyra_analyze::plugin::TrustStore;
+    let path = plugin_trust_path(repo);
+    let mut store = TrustStore::load(&path)?;
+    let mut changed = false;
+    for id in &args.revoke_plugin {
+        if store.revoke(id) {
+            anstream::eprintln!("Plugin `{id}` is no longer trusted here.");
+            changed = true;
+        }
+    }
+    for id in &args.trust_plugin {
+        let spec = analyzer
+            .plugins()
+            .find(|p| p.id == *id)
+            .with_context(|| format!("there is no plugin `{id}` in {ANALYZERS_FILE}"))?;
+        store.trust(spec);
+        changed = true;
+        anstream::eprintln!("Trusted plugin `{id}`: it runs `{}` from the repository root.", spec.command.join(" "));
+    }
+    if changed {
+        store.save(&path)?;
+    }
+    if args.no_plugins {
+        return Ok(false);
+    }
+    let owned = repo.git().git_dir_trust() == veyra_core::gix::sec::Trust::Full;
+    let mut failed = false;
+    for spec in analyzer.plugins() {
+        if !owned {
+            ui::warn(&format!("plugin `{}` skipped: this repository isn't owned by you", spec.id));
+            continue;
+        }
+        if !store.is_trusted(spec) {
+            ui::warn(&format!(
+                "plugin `{}` isn't trusted here (it would run `{}`)\n  hint: review it in {ANALYZERS_FILE}, then `veyra analyze --trust-plugin {}`",
+                spec.id,
+                spec.command.join(" "),
+                spec.id
+            ));
+            continue;
+        }
+        match spec.run(repo.workdir()?, files) {
+            Ok(found) => findings.extend(analyzer.keep_enabled(found)),
+            Err(err) => {
+                ui::warn(&format!("{err:#}"));
+                failed = true;
+            }
+        }
+    }
+    Ok(failed)
 }

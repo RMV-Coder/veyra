@@ -168,6 +168,8 @@ pub fn rebase(
         };
         let upstream_id = repo.rev_parse_commit(&upstream_spec)?;
         let onto_id = onto.as_deref().map(|o| repo.rev_parse_commit(o)).transpose()?;
+        // Like git, the pre-rebase hook can veto the rebase before anything changes.
+        repo.run_hook("pre-rebase", &[&upstream_spec], None)?;
         let plan = if interactive { Some(edit_todo(&repo, upstream_id)?) } else { None };
         if plan.as_ref().is_some_and(Vec::is_empty) {
             anstream::println!("Nothing to do: the todo list is empty.");

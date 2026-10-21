@@ -151,7 +151,14 @@ impl Repo {
         if tree_id == ObjectId::empty_tree(self.git.object_hash()) {
             return Ok(FlatTree::new());
         }
-        let index = self.git.index_from_tree(&tree_id).with_context(|| format!("could not read tree {tree_id}"))?;
+        let index = match self.git.index_from_tree(&tree_id) {
+            Ok(index) => index,
+            // A partial clone with a tree filter fetches trees when they are first needed.
+            Err(_) if self.is_partial() && self.ensure_trees(tree_id)? > 0 => {
+                self.git.index_from_tree(&tree_id).with_context(|| format!("could not read tree {tree_id}"))?
+            }
+            Err(err) => return Err(err).with_context(|| format!("could not read tree {tree_id}")),
+        };
         Ok(flat_from_index_state(&index))
     }
 
@@ -173,7 +180,19 @@ impl Repo {
     /// subtrees whose ids differ (much cheaper than flattening both).
     pub fn changed_paths(&self, old: Option<ObjectId>, new: Option<ObjectId>) -> Result<Vec<BString>> {
         let mut out = Vec::new();
-        self.changed_paths_into(old, new, &BString::default(), &mut out)?;
+        if let Err(err) = self.changed_paths_into(old, new, &BString::default(), &mut out) {
+            // A partial clone with a tree filter fetches trees when they are first needed.
+            let fetched = if self.is_partial() {
+                old.into_iter().chain(new).map(|t| self.ensure_trees(t)).sum::<Result<usize>>()?
+            } else {
+                0
+            };
+            if fetched == 0 {
+                return Err(err);
+            }
+            out.clear();
+            self.changed_paths_into(old, new, &BString::default(), &mut out)?;
+        }
         Ok(out)
     }
 

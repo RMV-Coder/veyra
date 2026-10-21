@@ -47,12 +47,14 @@ impl Repo {
         let git = gix::discover(start).map_err(|err| {
             anyhow!("not a git repository (or any of the parent directories): {}\n  cause: {err}", start.display())
         })?;
+        check_supported(&git)?;
         Ok(Repo { git, auto_resolutions: Default::default() })
     }
 
     /// Open the repository at exactly `path`.
     pub fn open(path: &Path) -> Result<Self> {
         let git = gix::open(path).with_context(|| format!("could not open repository at {}", path.display()))?;
+        check_supported(&git)?;
         Ok(Repo { git, auto_resolutions: Default::default() })
     }
 
@@ -217,8 +219,19 @@ impl Repo {
     pub fn rev_parse_tree(&self, spec: &str) -> Result<ObjectId> {
         let id = self.rev_parse(spec)?;
         let object = self.git.find_object(id)?;
-        let tree =
-            object.peel_to_kind(gix::object::Kind::Tree).map_err(|_| anyhow!("'{spec}' does not point to a tree"))?;
+        if object.kind == gix::object::Kind::Tree {
+            return Ok(id);
+        }
+        // Take the tree id from the commit without loading the tree, which a partial clone may
+        // not have yet (it's fetched when the tree is read).
+        if let Ok(commit) = object.peel_to_kind(gix::object::Kind::Commit) {
+            return self.commit_tree_id(commit.id);
+        }
+        let tree = self
+            .git
+            .find_object(id)?
+            .peel_to_kind(gix::object::Kind::Tree)
+            .map_err(|_| anyhow!("'{spec}' does not point to a tree"))?;
         Ok(tree.id)
     }
 
@@ -361,4 +374,17 @@ pub(crate) fn fs_path(path: &gix::bstr::BStr) -> Result<PathBuf> {
     Ok(gix::path::from_bstr(path)
         .map_err(|e| anyhow!("path {path:?} cannot be represented on this platform: {e}"))?
         .into_owned())
+}
+
+/// Refuse repository formats Veyra can't read correctly, and say how to convert them.
+fn check_supported(git: &gix::Repository) -> Result<()> {
+    let storage = git.config_snapshot().string("extensions.refStorage").map(|s| s.to_str_lossy().to_ascii_lowercase());
+    if let Some(storage) = storage
+        && storage != "files"
+    {
+        bail!(
+            "this repository stores its references as `{storage}`, which Veyra can't read yet\n  hint: convert it to the classic format with `git refs migrate --ref-format=files` (Git 2.46+); Git works the same afterwards"
+        );
+    }
+    Ok(())
 }

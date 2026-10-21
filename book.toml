@@ -1,0 +1,17 @@
+[book]
+title = "Veyra"
+description = "A Git-compatible version control system: the documentation"
+authors = ["Raymond Valdepeñas"]
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/book"
+
+[output.html]
+git-repository-url = "https://github.com/RMV-Coder/veyra"
+edit-url-template = "https://github.com/RMV-Coder/veyra/edit/main/{path}"
+no-section-label = true
+
+[output.html.search]
+enable = true

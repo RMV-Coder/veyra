@@ -19,6 +19,7 @@ pub mod config;
 pub mod delta;
 pub mod diff;
 pub mod flat;
+pub mod fsck;
 pub mod history;
 pub mod hooks;
 pub mod impact;

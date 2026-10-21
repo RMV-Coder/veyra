@@ -77,57 +77,80 @@ pub struct SplitPlan {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct PlannedCommit {
     pub message: String,
-    pub files: Vec<String>,
+    /// Unit ids: a path for a whole file, `path#N` for one hunk (`files` in older plans).
+    #[serde(alias = "files")]
+    pub changes: Vec<String>,
+}
+
+/// One piece of the staged change the plan can assign: a whole file, or one hunk of a file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SplitUnit {
+    /// `path`, or `path#N` for the N-th hunk of `path`.
+    pub id: String,
+    pub path: String,
 }
 
 impl SplitPlan {
-    /// The plan must assign every staged file to exactly one commit, and nothing else.
-    pub fn validate(&self, staged: &[String]) -> Result<(), String> {
+    /// Check that the plan gives every unit to exactly one commit, and nothing else, and return
+    /// each commit's unit ids. Naming a file's path covers all of its hunks.
+    pub fn validate(&self, units: &[SplitUnit]) -> Result<Vec<Vec<String>>, String> {
         if self.commits.is_empty() {
             return Err("the plan has no commits".into());
         }
         let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
         for c in &self.commits {
-            if c.files.is_empty() || c.message.trim().is_empty() {
-                return Err("a planned commit has no files or no message".into());
+            if c.changes.is_empty() || c.message.trim().is_empty() {
+                return Err("a planned commit has no changes or no message".into());
             }
-            for f in &c.files {
-                if !staged.contains(f) {
-                    return Err(format!("the plan mentions '{f}', which is not staged"));
+            let mut ids = Vec::new();
+            for name in &c.changes {
+                let matching: Vec<&SplitUnit> =
+                    units.iter().filter(|u| u.id == *name || (u.path == *name && u.id != u.path)).collect();
+                if matching.is_empty() {
+                    return Err(format!("the plan mentions '{name}', which is not a staged file or hunk"));
                 }
-                if !seen.insert(f.clone()) {
-                    return Err(format!("the plan puts '{f}' in more than one commit"));
+                for unit in matching {
+                    if !seen.insert(unit.id.clone()) {
+                        return Err(format!("the plan puts '{}' in more than one commit", unit.id));
+                    }
+                    ids.push(unit.id.clone());
                 }
             }
+            out.push(ids);
         }
-        if let Some(missing) = staged.iter().find(|f| !seen.contains(*f)) {
-            return Err(format!("the plan leaves '{missing}' out"));
+        if let Some(missing) = units.iter().find(|u| !seen.contains(&u.id)) {
+            return Err(format!("the plan leaves '{}' out", missing.id));
         }
-        Ok(())
+        Ok(out)
     }
 }
 
-pub fn split(diff: &str, files: &[String], recent: &[String]) -> Request {
+/// `units` pairs each unit with its diff.
+pub fn split(units: &[(SplitUnit, String)], recent: &[String]) -> Request {
     let mut prompt = String::new();
     if !recent.is_empty() {
         prompt.push_str(&fenced("recent_commit_subjects", &recent.join("\n")));
     }
-    prompt.push_str(&fenced("staged_files", &files.join("\n")));
-    prompt.push_str(&fenced("staged_diff", diff));
+    let ids: Vec<&str> = units.iter().map(|(u, _)| u.id.as_str()).collect();
+    prompt.push_str(&fenced("change_units", &ids.join("\n")));
+    let diffs: String = units.iter().map(|(u, d)| format!("### {}\n{d}\n", u.id)).collect();
+    prompt.push_str(&fenced("staged_diff", &diffs));
     prompt.push_str(
-        "Group the staged files into a sequence of focused commits, each a coherent change that would make \
-         sense on its own, in an order where each commit builds on the previous ones. Every staged file \
-         must appear in exactly one commit, using the paths exactly as listed. If the change is already \
-         one coherent unit, return a single commit. Give each commit a full message (subject line, blank \
-         line, optional body) in the repository's style.",
+        "Group the staged changes into a sequence of focused commits, each a coherent change that would \
+         make sense on its own, in an order where each commit builds on the previous ones. A unit is a \
+         whole file (its path) or one hunk of a file (`path#N`); hunks of one file may go to different \
+         commits. Every unit must appear in exactly one commit, using the ids exactly as listed. If the \
+         change is already one coherent unit, return a single commit. Give each commit a full message \
+         (subject line, blank line, optional body) in the repository's style.",
     );
     Request {
         system: PREAMBLE.into(),
         prompt,
         schema: Some(strict_object(
             json!({ "commits": { "type": "array", "items": strict_object(
-                json!({ "message": { "type": "string" }, "files": { "type": "array", "items": { "type": "string" } } }),
-                &["message", "files"],
+                json!({ "message": { "type": "string" }, "changes": { "type": "array", "items": { "type": "string" } } }),
+                &["message", "changes"],
             ) } }),
             &["commits"],
         )),
@@ -377,7 +400,7 @@ mod tests {
     fn schemas_are_valid_for_structured_outputs() {
         for r in [
             commit_message("d", &[]),
-            split("d", &["a".into()], &[]),
+            split(&[(SplitUnit { id: "a".into(), path: "a".into() }, "d".into())], &[]),
             review("d", ""),
             risks("{}", "d"),
             resolve("p", "b", "o", "t", "c"),
@@ -388,18 +411,27 @@ mod tests {
     }
 
     #[test]
-    fn split_plans_must_partition_the_staged_files() {
-        let staged = vec!["a".to_string(), "b".to_string()];
+    fn split_plans_must_partition_the_staged_units() {
+        let unit = |id: &str, path: &str| SplitUnit { id: id.into(), path: path.into() };
+        let units = vec![unit("a", "a"), unit("b#1", "b"), unit("b#2", "b")];
         let plan = |groups: &[&[&str]]| SplitPlan {
             commits: groups
                 .iter()
-                .map(|g| PlannedCommit { message: "m".into(), files: g.iter().map(|s| s.to_string()).collect() })
+                .map(|g| PlannedCommit { message: "m".into(), changes: g.iter().map(|s| s.to_string()).collect() })
                 .collect(),
         };
-        assert!(plan(&[&["a"], &["b"]]).validate(&staged).is_ok());
-        assert!(plan(&[&["a"]]).validate(&staged).unwrap_err().contains("leaves 'b' out"));
-        assert!(plan(&[&["a", "b"], &["b"]]).validate(&staged).unwrap_err().contains("more than one"));
-        assert!(plan(&[&["a", "b", "c"]]).validate(&staged).unwrap_err().contains("not staged"));
+        assert_eq!(
+            plan(&[&["a", "b#2"], &["b#1"]]).validate(&units).unwrap(),
+            vec![vec!["a".to_string(), "b#2".into()], vec!["b#1".into()]]
+        );
+        // A path stands for all of its hunks.
+        assert_eq!(plan(&[&["a"], &["b"]]).validate(&units).unwrap()[1], vec!["b#1".to_string(), "b#2".into()]);
+        assert!(plan(&[&["a"], &["b#1"]]).validate(&units).unwrap_err().contains("leaves 'b#2' out"));
+        assert!(plan(&[&["a", "b"], &["b#1"]]).validate(&units).unwrap_err().contains("more than one"));
+        assert!(plan(&[&["a", "b", "c"]]).validate(&units).unwrap_err().contains("not a staged"));
+        // Older plans call the list `files`.
+        let old: SplitPlan = serde_json::from_str(r#"{"commits":[{"message":"m","files":["a"]}]}"#).unwrap();
+        assert_eq!(old.commits[0].changes, vec!["a".to_string()]);
     }
 
     #[test]

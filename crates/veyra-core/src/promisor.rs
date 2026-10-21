@@ -207,6 +207,43 @@ impl Repo {
         Ok(missing.len())
     }
 
+    /// Make sure `tree` and every tree below it are present: a `tree:<depth>` filter leaves them
+    /// on the promisor remote. Missing trees are fetched one level at a time, each batch with
+    /// `blob:none` (as Git's lazy fetch does), which also brings the trees below them. Returns
+    /// how many were fetched.
+    pub fn ensure_trees(&self, tree: ObjectId) -> Result<usize> {
+        let Some(remote) = self.promisor_remote() else { return Ok(0) };
+        let mut fetched = 0;
+        let mut seen = HashSet::new();
+        let mut level = vec![tree];
+        while !level.is_empty() {
+            let missing: Vec<ObjectId> = level.iter().copied().filter(|id| !self.git.has_object(*id)).collect();
+            if !missing.is_empty() {
+                let url = self.remote_url(&remote)?;
+                let request =
+                    FetchRequest { wants: missing.clone(), filter: Some("blob:none".into()), ..Default::default() };
+                self.fetch_exact(&url, &request)
+                    .with_context(|| format!("could not fetch {} missing tree(s) from '{remote}'", missing.len()))?;
+                fetched += missing.len();
+            }
+            let mut next = Vec::new();
+            for id in level {
+                if !seen.insert(id) {
+                    continue;
+                }
+                let tree = self.git.find_tree(id).with_context(|| format!("could not read tree {id}"))?;
+                for entry in tree.iter() {
+                    let entry = entry?;
+                    if entry.mode().is_tree() {
+                        next.push(entry.oid().to_owned());
+                    }
+                }
+            }
+            level = next;
+        }
+        Ok(fetched)
+    }
+
     /// Make sure the blobs of `tree` (only under `paths`, if given) are present.
     pub fn ensure_tree_blobs(&self, flat: &FlatTree, sparse: Option<&crate::sparse::Sparse>) -> Result<usize> {
         if !self.is_partial() {

@@ -3,12 +3,50 @@
 All notable changes are listed here. Veyra follows [semantic versioning](https://semver.org/);
 see [docs/STABILITY.md](docs/STABILITY.md) for what 1.x keeps stable.
 
-## Unreleased
+## 1.3.0
 
-- **Veyra review GitHub Action** (`.github/actions/veyra-review`): on each pull request, the
-  risk and its reasons, analyzer findings, tests to run, what may be affected (with evidence),
-  changed symbols, commit signatures and structural merges, as a job summary and one PR comment
-  that is updated on each push. Optional `fail-on` gate. See [docs/CI.md](docs/CI.md).
+Veyra is labelled **beta**: it is tested against real Git on Windows, but Linux and macOS have no
+CI results yet (README, COMPATIBILITY.md and STABILITY.md now say so).
+
+**Interoperability with Git**
+
+- Rebases (`.git/rebase-merge`), bisect sessions (`BISECT_*`, `refs/bisect/*`) and multi-commit
+  cherry-picks and reverts (`.git/sequencer`) use Git's own state, so either tool can continue,
+  skip or abort what the other started. State left by older Veyra versions is migrated.
+- Partial clones: `clone --filter=blob:none | blob:limit=<n> | tree:<depth>`, configured exactly as
+  Git configures them. Missing objects are fetched on demand, in batches before checkouts and
+  merges; `--filter` with `--scope` downloads only the scope's files; `veyra backfill` fetches the rest.
+- Shallow clones: `clone --depth`, `fetch --depth`, `fetch --unshallow`.
+- Merge strategies: `-s ours`, `-s subtree`, `-X ours`, `-X theirs`, `-X subtree=<dir>`, and octopus
+  merges of several branches (refused before anything changes if any of them conflicts).
+- Non-cone sparse checkout (`sparse set --no-cone`), with Git's pattern rules.
+- Git LFS is covered by the tests: clean filter on `add`, upload by the `pre-push` hook, smudge on
+  checkout.
+- The `pre-rebase` and `post-rewrite` (after `commit --amend`) hooks run.
+- `status --porcelain`.
+- Reftable repositories are refused with the conversion command (`git refs migrate
+  --ref-format=files`) instead of an obscure error.
+
+**Veyra features**
+
+- `veyra doctor --full`: every object read back, rehashed and parsed, pack checksums verified, and
+  everything reachable from references, `HEAD` and the index checked to exist (allowing for
+  partial and shallow clones).
+- Code intelligence for C, C++, C#, Ruby, PHP, Kotlin, Swift, Scala, Bash, Lua and Elixir:
+  semantic diff, structural merge and impact analysis, including import resolution (`#include`,
+  `using`, `require`, PSR-4, packages, Swift targets, `source`, Lua modules, Elixir aliases).
+- `commit --split` can split one file's change by hunk across several commits.
+- Analyzer plugins: `[[plugin]]` programs in `.veyra/analyzers.toml` that read the change as JSON
+  and report findings. They run only after you trust their exact definition locally
+  (`veyra analyze --trust-plugin <id>`). See docs/PLUGINS.md.
+- The documentation is an mdBook site (`book.toml`), published to GitHub Pages by
+  `.github/workflows/docs.yml`.
+
+**Fixed**
+
+- Commits in a partial clone failed because the tree writer required every blob to be present.
+- `clone --filter=tree:<depth>` failed at checkout; trees are now fetched when first needed (with
+  `blob:none`, as Git does), and `doctor` no longer reports them as missing.
 
 ## 1.2.0
 

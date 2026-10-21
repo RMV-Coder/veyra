@@ -18,11 +18,14 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 |---|---|---|---|
 | `git init [dir]` | `veyra init [dir] [-b <branch>] [--object-format sha256]` | ✅ | Respects `init.defaultBranch`. SHA-256 repositories work end to end. |
 | `git clone <url> [dir]` | `veyra clone <url> [dir]` | ✅ | HTTPS (rustls), SSH, `file://` and local paths through gitoxide |
-| `git status` | `veyra status [--short] [--json]` | ✅ | `--short` output matches `git status --porcelain`. Paths are shown relative to the repository root. |
+| `git clone --depth N` / `git fetch --depth N` / `--unshallow` | `veyra clone --depth N` / `veyra fetch --depth N` / `--unshallow` | ✅ | Shallow history in Git's `.git/shallow` |
+| `git clone --filter=…` | `veyra clone --filter=blob:none` (also `blob:limit=<n>[kmg]`, `tree:<depth>`) | ✅ | A partial clone configured exactly like Git's (promisor remote, `.promisor` packs), so both tools fetch missing objects on demand. Veyra fetches them in batches before checkouts and merges. |
+| `git backfill` | `veyra backfill` | ✅ | Downloads every object a partial clone left on the remote |
+| `git status` | `veyra status [--short] [--porcelain] [--json]` | ✅ | `--short` and `--porcelain` (v1) output match `git status --porcelain`. Paths are shown relative to the repository root. |
 | `git config` | `veyra config [--global] <key> [<value>]`, `--unset`, `--list` | ✅ | Same files as Git |
 | `git help` / `--version` | `veyra help`, `veyra --version` | ✅ | |
-| `git clone --sparse` | `veyra clone <url> --scope <name>` / `--sparse <dir>…` | ✅ | Only the scope's directories are checked out (cone-mode sparse). Scopes are declared in `.veyra/scopes.toml`. gitoxide has no partial-clone filters yet, so all objects are still fetched. |
-| `git sparse-checkout set/add/list/disable` | `veyra sparse set [dirs] [--scope s]` / `add` / `list` / `disable` | ✅ | Same `.git/info/sparse-checkout` and skip-worktree bits as Git (`git sparse-checkout list` agrees). Refuses to hide files with local changes. |
+| `git clone --sparse` | `veyra clone <url> --scope <name>` / `--sparse <dir>…` | ✅ | Only the scope's directories are checked out (cone-mode sparse). Scopes are declared in `.veyra/scopes.toml`. Add `--filter=blob:none` to download only the scope's files. |
+| `git sparse-checkout set/add/list/disable` | `veyra sparse set [dirs] [--scope s] [--no-cone]` / `add` / `list` / `disable` | ✅ | Same `.git/info/sparse-checkout` and skip-worktree bits as Git (`git sparse-checkout list` agrees). `--no-cone` takes Git's gitignore-style patterns (last match wins). Refuses to hide files with local changes. |
 
 ## Staging and committing
 
@@ -42,8 +45,8 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | — | `veyra commit --intent <id>` | ✅ | Adds `Intent:` |
 | — | secret scan + intent check on commit | ✅ | `--allow-secrets`, `--no-verify` |
 | `git commit -S` / `commit.gpgSign` | `veyra commit -S` / `--no-gpg-sign` | ✅ | OpenPGP, X.509 or SSH per `gpg.format` / `user.signingKey` (via gitoxide). Merges, cherry-picks and rebases are signed too when `commit.gpgSign` is set. |
-| Git hooks | `pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, `pre-push`, `post-checkout`, `post-merge` | ✅ | `core.hooksPath` respected. Hooks run through Git for Windows' `sh` on Windows. Never run in repositories you don't own. `--no-verify` skips them. |
-| — | `veyra commit --smart` / `--split` [`--dry-run`] | ✅ | Optional AI (see `veyra ai`). `--smart` proposes a message you accept, edit or reject; `--split` proposes a sequence of commits for the staged files, validated to cover every staged file exactly once before you see it. Each commit is a normal, undoable commit with an `Assisted-by:` trailer, and hooks and secret scanning still run. |
+| Git hooks | `pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, `pre-push`, `post-checkout`, `post-merge`, `pre-rebase`, `post-rewrite` | ✅ | `core.hooksPath` respected. Hooks run through Git for Windows' `sh` on Windows. Never run in repositories you don't own. `--no-verify` skips them. |
+| — | `veyra commit --smart` / `--split` [`--dry-run`] | ✅ | Optional AI (see `veyra ai`). `--smart` proposes a message you accept, edit or reject; `--split` proposes a sequence of commits for the staged change, by file or by hunk (hunks of one file can go to different commits), validated to cover every file and hunk exactly once before you see it. Each commit is a normal, undoable commit with an `Assisted-by:` trailer, and hooks and secret scanning still run. |
 
 ## History and inspection
 
@@ -58,12 +61,12 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git shortlog [-s] [-n] [-e] [range]` | `veyra shortlog` | ✅ | Output matches `git shortlog`; `--json` |
 | `git describe [--tags] [--long] [--always] [--dirty]` | `veyra describe` | ✅ | Same names as `git describe` |
 | `git grep [-i] [-w] [-F] [-n] [-l] [-c] [--cached] [rev] [-- paths]` | `veyra grep` | ✅ | Rust regex syntax; exits 1 when nothing matches, like Git |
-| `git bisect start/good/bad/skip/run/log/reset` | `veyra bisect …` | ✅ | Picks the commit that splits the candidates most evenly, merges included. `run`: exit 0 good, 125 skip, 1–127 bad. Every step is journaled. State lives in `.git/veyra/bisect.json`, so it doesn't mix with a `git bisect` session. |
+| `git bisect start/good/bad/skip/run/log/reset` | `veyra bisect …` | ✅ | Picks the commit that splits the candidates most evenly, merges included. `run`: exit 0 good, 125 skip, 1–127 bad. Every step is journaled. The session is Git's (`BISECT_*` files, `refs/bisect/*`), so either tool can continue or reset it. |
 | `git format-patch [-o dir] [--stdout] <range>` | `veyra format-patch` | ✅ | mbox files that `git am` applies |
 | `git apply [--cached\|--index] [--check] [-R]` | `veyra apply` | ✅ | Git and plain unified diffs. Hunks apply at their position or where their context matches exactly, never fuzzily; nothing is written unless every file applies. Binary patches are refused. Journaled. |
 | `git am <mbox>…` | `veyra am` | ✅ | Reads `git format-patch` output (author, date, subject, body); one journaled commit per patch |
 | `git notes add/append/show/list/remove [--ref R]` | `veyra notes …` | ✅ | Git's notes layout (`refs/notes/commits` by default); `git notes show` reads Veyra's notes |
-| — | `veyra diff --semantic` / `--functions` [`--json`] | ✅ | Functions, methods, classes and types that were added, removed, modified, had their signature changed, were only reformatted, or renamed (renames need a token-identical, non-trivial body). Rust, TypeScript/TSX, JavaScript, Python, Go, Java (Tree-sitter). Other files are listed as unsupported. |
+| — | `veyra diff --semantic` / `--functions` [`--json`] | ✅ | Functions, methods, classes and types that were added, removed, modified, had their signature changed, were only reformatted, or renamed (renames need a token-identical, non-trivial body). Rust, TypeScript/TSX, JavaScript, Python, Go, Java, C, C++, C#, Ruby, PHP, Kotlin, Swift, Scala, Bash, Lua and Elixir (Tree-sitter). Other files are listed as unsupported. |
 
 ## Branches
 
@@ -86,12 +89,13 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | Git | Veyra | Status | Notes |
 |---|---|---|---|
 | `git merge <rev> [--ff-only] [--no-ff] [-m]` | `veyra merge …` | ✅ | Fast-forward, clean 3-way merge, or conflicts written exactly like Git (markers + index stages + `MERGE_HEAD`) |
+| `git merge -s ours\|subtree`, `-X ours\|theirs\|subtree=<dir>`, `git merge A B C` | `veyra merge -s …` / `-X …` / `veyra merge A B C` | ✅ | `-s ours` keeps our tree; `-X ours/theirs` decides conflicting hunks; subtree merges find (or are told) the directory; an octopus merge with any conflict is refused before anything changes |
 | `git merge --abort` / `--continue` | `veyra merge --abort` / `--continue` | ✅ | Abort replays the operation log |
 | `git reset [--soft\|--mixed\|--hard] [rev]` | `veyra reset …` | ✅ | **Difference:** `--hard` checkpoints first |
 | `git reset <paths>` | `veyra reset <paths>` / `unstage` | ✅ | |
-| `git cherry-pick [-x] [-n] [-m N]` | `veyra cherry-pick` | ✅ | Keeps the original author. Conflicts leave `CHERRY_PICK_HEAD` like Git. `--continue` / `--abort`. |
-| `git revert [-n] [-m N]` | `veyra revert` | ✅ | The safe way to reverse pushed commits. `--continue` / `--abort`. |
-| `git rebase <upstream> [--onto X]` | `veyra rebase` | ✅ | Defaults to the branch's upstream. `--continue` / `--skip` / `--abort`. State lives in `.git/veyra/rebase-state`, so plain `git rebase --continue` doesn't know about it. `veyra undo` restores the pre-rebase branch. |
+| `git cherry-pick [-x] [-n] [-m N]` | `veyra cherry-pick` | ✅ | Keeps the original author. Conflicts leave `CHERRY_PICK_HEAD` like Git. Several commits use Git's `.git/sequencer`, so `--continue` / `--skip` / `--abort` work from either tool. |
+| `git revert [-n] [-m N]` | `veyra revert` | ✅ | The safe way to reverse pushed commits. `--continue` / `--skip` / `--abort`, sequences shared with Git. |
+| `git rebase <upstream> [--onto X]` | `veyra rebase` | ✅ | Defaults to the branch's upstream. `--continue` / `--skip` / `--abort`. State lives in Git's `.git/rebase-merge`, so a rebase started by either tool can be continued or aborted by the other. `veyra undo` restores the pre-rebase branch. |
 | `git rebase -i` | `veyra rebase -i <upstream>` | ✅ | `pick`, `reword`, `edit`, `squash`, `fixup`, `drop`, `exec`, `break` (and their one-letter forms), plus reordering. Uses `GIT_SEQUENCE_EDITOR` / `sequence.editor`, then the commit editor. |
 | `git rerere` / `rerere forget` / `rerere clear` | `veyra merge resolutions [status\|list\|forget <path>\|clear\|enable [--auto-stage]\|disable]` (alias `veyra rerere …`) | ✅ | Git's own `.git/rr-cache` format and conflict ids: resolutions recorded by Veyra are replayed by Git and vice versa. Enabled by `rerere.enabled` (or an existing rr-cache). Replays apply to merges, cherry-picks, reverts, rebases and stash applications, slightly shifted conflicts included; `rerere.autoUpdate` stages them. Every replay is reported. |
 | — | structural merge (automatic in `merge`, `pull`, `cherry-pick`, `revert`, `rebase`, `stash apply/pop`) | ✅ | When Git's line merge conflicts but the two sides changed *different* top-level symbols, Veyra merges the file symbol by symbol. It refuses on syntax errors, same-symbol edits, delete-vs-modify and reorders on both sides, and re-parses the result. Every resolution is printed, and recorded as a `Veyra-Structural-Merge:` trailer. `veyra.structuralMerge` = `true` · `stage` (resolve, then stop for review) · `false`. |
@@ -128,7 +132,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | Git | Veyra | Status | Notes |
 |---|---|---|---|
 | `git remote [-v]`, `add`, `remove` | `veyra remote …` | ✅ | |
-| `git fetch [remote]` | `veyra fetch` | ✅ | |
+| `git fetch [remote]` | `veyra fetch [--depth N] [--unshallow]` | ✅ | In a partial clone, fetches keep the filter |
 | `git pull [--ff-only]` | `veyra pull` | ✅ | Fetch + fast-forward or merge |
 | `git push [remote] [refspec…]` | `veyra push` | ✅ | Implemented on gix's transport (HTTPS, SSH, local). Supports `-u`, `--tags`, `--delete`, `+refspec`, `--force`, `--force-with-lease`, `--dry-run`, `--no-verify`. Credential helpers are used. Changed blobs are sent as deltas against their previous version (a thin pack, like `git push --thin`). |
 | `git ls-remote [--heads] [--tags] [remote\|url]` | `veyra remote refs` (alias `veyra ls-remote`) | ✅ | Same output as `git ls-remote`; `--json` |
@@ -148,13 +152,13 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 
 | Command | Status | What it does |
 |---|---|---|
-| `veyra doctor [--json]` | ✅ | PASS/WARN/FAIL with evidence for identity, integrity, in-progress ops, storage, large files, secrets, branches, journal and compatibility. Exits non-zero on FAIL. |
+| `veyra doctor [--full] [--json]` | ✅ | PASS/WARN/FAIL with evidence for identity, integrity, in-progress ops, storage, large files, secrets, branches, journal and compatibility. `--full` also rehashes and parses every object, verifies pack checksums and checks connectivity. Exits non-zero on FAIL. |
 | `veyra security scan [--staged \| --rev R] [--json]` | ✅ | Built-in and custom rules, redacted output, fingerprints. Exits non-zero on high-confidence findings. |
 | `veyra security allow <fingerprint>` | ✅ | Allowlists a reviewed false positive in `.veyra/secrets.toml` |
 | `veyra intent create --title … [--guard-path G --guard-contains T]` | ✅ | Writes `.veyra/intents/<id>.toml` |
 | `veyra intent list / show / verify [--staged\|--rev] / close / log` | ✅ | `verify` exits non-zero on violations |
 | `veyra explain <git command…>` | ✅ | What it does, risk, recovery, Veyra equivalent |
-| `git fsck` | `veyra doctor` | 🟡 | doctor checks refs, commits and trees. Use `git fsck --full` for blobs. |
+| `git fsck [--full]` | `veyra doctor [--full]` | ✅ | `--full` reads back every object (blobs too), verifies packs and connectivity; objects a partial clone left on the remote and history cut off by a shallow clone are expected, not errors |
 | `git count-objects -v` | `veyra storage stats [--json]` | ✅ | |
 | `git gc` / `git maintenance run` | `veyra maintenance run [--prune-expire 2w]` | ✅ | Packs loose objects (Veyra's own pack writer, indexed by gitoxide), then prunes unreachable loose objects past the grace period. Reachability includes every ref, reflog entry, the index, in-progress state and Veyra's journal. Packs are never rewritten. |
 | `git prune` | `veyra maintenance prune [--expire 2w] [-n]` | ✅ | |
@@ -166,7 +170,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | — | `veyra ai [status]` / `ai configure [--provider anthropic\|command] [--model M] [--effort E] [--command CMD] [--global]` / `ai disable` | ✅ | Off by default. `anthropic` uses the Claude API (default model `claude-opus-5-5`; the key comes from `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` and is never stored). `command` runs any local model: the request arrives as JSON on stdin, the answer is read from stdout. |
 | — | `veyra ai explain [REV\|--staged]` / `ai review [scope]` / `ai summarize [RANGE]` / `ai risks [scope]` | ✅ | Explanations, reviews (findings with severity and location, `--json`), PR/release summaries, and risk assessments built on the deterministic `impact` report. Every request is scanned for secrets first (nothing is sent if one is found), and `--dry-run` prints exactly what would be sent. |
 | — | `veyra intent suggest <paths> [--dry-run]` | ✅ | An AI-proposed intent with guards. Guards the current code doesn't satisfy are dropped before you see the proposal; you approve it before it's written. Verification stays deterministic. |
-| — | `veyra analyze [--migration] [--infra] [scope] [--fail-on high\|medium\|low] [--json]` | ✅ | Deterministic risk rules for what a change *adds*: SQL (DROP/TRUNCATE, DELETE/UPDATE without WHERE, NOT NULL without default, blocking index builds, renames, type changes…), ORM migrations (Rails, Django, Alembic, Knex), Terraform (destroyed resources, open ingress, public buckets, wildcard IAM, disabled protection/encryption), Kubernetes (privileged, host namespaces, root, `:latest`, zero replicas), Dockerfiles and CI workflows. Repository rules and `disable = [...]` in `.veyra/analyzers.toml`. `--fail-on` makes it a CI gate. |
+| — | `veyra analyze [--migration] [--infra] [scope] [--fail-on high\|medium\|low] [--json]` | ✅ | Deterministic risk rules for what a change *adds*: SQL (DROP/TRUNCATE, DELETE/UPDATE without WHERE, NOT NULL without default, blocking index builds, renames, type changes…), ORM migrations (Rails, Django, Alembic, Knex), Terraform (destroyed resources, open ingress, public buckets, wildcard IAM, disabled protection/encryption), Kubernetes (privileged, host namespaces, root, `:latest`, zero replicas), Dockerfiles and CI workflows. Repository rules, [plugins](PLUGINS.md) (`--trust-plugin <id>`, `--revoke-plugin`, `--no-plugins`) and `disable = [...]` in `.veyra/analyzers.toml`. `--fail-on` makes it a CI gate. |
 
 To see `impact`, `analyze`, `diff --semantic` and commit signatures on every pull request, use the
 Veyra review GitHub Action: [CI.md](CI.md).

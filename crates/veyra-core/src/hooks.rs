@@ -108,4 +108,9 @@ impl Repo {
     pub fn run_post_hook(&self, name: &str, args: &[&str]) -> Option<String> {
         self.run_hook(name, args, None).err().map(|e| e.to_string())
     }
+
+    /// Like [`Repo::run_post_hook`], with input on stdin (`post-rewrite`).
+    pub fn run_post_hook_with_input(&self, name: &str, args: &[&str], stdin: &[u8]) -> Option<String> {
+        self.run_hook(name, args, Some(stdin)).err().map(|e| e.to_string())
+    }
 }
