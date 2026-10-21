@@ -55,7 +55,14 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git diff` / `--staged` / `<rev>` / `<a> <b>` / `a..b` | `veyra diff …` | ✅ | `--stat`, `--name-only`, `--name-status`, `-U<n>`, `-- <paths>`. Hunks match `git diff`. |
 | `git blame [-L a,b]` | `veyra blame <file> [-L a,b] [--rev R] [--json]` | ✅ | Line attribution matches `git blame` |
 | `git reflog` | `veyra op log` | ✅ | Records *every* operation, including staging and uncommitted files |
-| `git shortlog`, `describe`, `grep`, `bisect` | same names | 🗓 2–3 | |
+| `git shortlog [-s] [-n] [-e] [range]` | `veyra shortlog` | ✅ | Output matches `git shortlog`; `--json` |
+| `git describe [--tags] [--long] [--always] [--dirty]` | `veyra describe` | ✅ | Same names as `git describe` |
+| `git grep [-i] [-w] [-F] [-n] [-l] [-c] [--cached] [rev] [-- paths]` | `veyra grep` | ✅ | Rust regex syntax; exits 1 when nothing matches, like Git |
+| `git bisect start/good/bad/skip/run/log/reset` | `veyra bisect …` | ✅ | Picks the commit that splits the candidates most evenly, merges included. `run`: exit 0 good, 125 skip, 1–127 bad. Every step is journaled. State lives in `.git/veyra/bisect.json`, so it doesn't mix with a `git bisect` session. |
+| `git format-patch [-o dir] [--stdout] <range>` | `veyra format-patch` | ✅ | mbox files that `git am` applies |
+| `git apply [--cached\|--index] [--check] [-R]` | `veyra apply` | ✅ | Git and plain unified diffs. Hunks apply at their position or where their context matches exactly, never fuzzily; nothing is written unless every file applies. Binary patches are refused. Journaled. |
+| `git am <mbox>…` | `veyra am` | ✅ | Reads `git format-patch` output (author, date, subject, body); one journaled commit per patch |
+| `git notes add/append/show/list/remove [--ref R]` | `veyra notes …` | ✅ | Git's notes layout (`refs/notes/commits` by default); `git notes show` reads Veyra's notes |
 | — | `veyra diff --semantic` / `--functions` [`--json`] | ✅ | Functions, methods, classes and types that were added, removed, modified, had their signature changed, were only reformatted, or renamed (renames need a token-identical, non-trivial body). Rust, TypeScript/TSX, JavaScript, Python, Go, Java (Tree-sitter). Other files are listed as unsupported. |
 
 ## Branches
@@ -124,7 +131,7 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 | `git fetch [remote]` | `veyra fetch` | ✅ | |
 | `git pull [--ff-only]` | `veyra pull` | ✅ | Fetch + fast-forward or merge |
 | `git push [remote] [refspec…]` | `veyra push` | ✅ | Implemented on gix's transport (HTTPS, SSH, local). Supports `-u`, `--tags`, `--delete`, `+refspec`, `--force`, `--force-with-lease`, `--dry-run`, `--no-verify`. Credential helpers are used. Changed blobs are sent as deltas against their previous version (a thin pack, like `git push --thin`). |
-| `git ls-remote` | `veyra remote refs` | 🗓 2 | |
+| `git ls-remote [--heads] [--tags] [remote\|url]` | `veyra remote refs` (alias `veyra ls-remote`) | ✅ | Same output as `git ls-remote`; `--json` |
 | — | `veyra sync [--push]` | ✅ | Fetch, then fast-forward, or rebase onto the upstream if both sides moved. Refuses with uncommitted changes. Pushes only with `--push`. |
 
 ## Tags and releases
@@ -133,7 +140,9 @@ Veyra records it as an `external` operation, so `veyra undo` still works afterwa
 |---|---|---|---|
 | `git tag` / `<name> [rev]` / `-a -m` / `-s` / `-d` / `-f` | `veyra tag …` / `tag create\|delete\|list` | ✅ | `-s` (or `tag.gpgSign`) signs. Annotated tags have a tagger. |
 | `git verify-commit` / `git verify-tag` | `veyra verify commit [rev]` / `veyra verify tag <name>` | ✅ | Uses Git's verification config (`gpg.ssh.allowedSignersFile`, `gpg.program`, …) |
-| — | `veyra release notes / prepare / verify` | 🗓 3 | |
+| — | `veyra release notes [range]` | ✅ | Markdown notes since the last version tag, grouped by Conventional Commits type, breaking changes first; `--json` |
+| — | `veyra release prepare <version> [--dry-run] [-s] [--force]` | ✅ | Preflight (tag is new, clean tree, changes since the last release; warnings for non-semver versions, not on the default branch, unpushed, unsigned, no test attestation), then an annotated tag with the release notes. Journaled. |
+| — | `veyra release verify <tag>` | ✅ | Tag signature, signature status of every commit in the release, attestations; exits non-zero on a bad signature |
 
 ## Diagnostics, security and intent (Veyra-only)
 
@@ -169,7 +178,14 @@ Plumbing commands keep their Git names at the top level (hidden from the main he
 | `git hash-object [-w]` | `veyra hash-object` | ✅ (applies the clean filter inside a worktree, like Git) |
 | `git ls-files [-s]` | `veyra ls-files` | ✅ |
 | `git show-ref` | `veyra show-ref` | ✅ |
-| `write-tree`, `commit-tree`, `update-ref`, `for-each-ref`, `merge-base`, `pack-objects`, `bundle`, `archive`, `notes`, `apply`, `am`, `format-patch`, … | same names | 🗓 2–3 |
+| `git write-tree` | `veyra write-tree` | ✅ |
+| `git commit-tree <tree> [-p P]… -m M` | `veyra commit-tree` | ✅ (signs when `commit.gpgSign` is set) |
+| `git update-ref [-d] <ref> <new> [<old>]` | `veyra update-ref` | ✅ (journaled, so undoable) |
+| `git for-each-ref [--format] [patterns]` | `veyra for-each-ref` | ✅ (`%(refname[:short])`, `%(objectname[:short])`, `%(objecttype)`, `%(subject)`) |
+| `git merge-base [--is-ancestor] A B` | `veyra merge-base` | ✅ |
+| `git pack-objects --stdout` | `veyra pack-objects --stdout` | ✅ (ids on stdin) |
+| `git archive [--format tar\|tgz\|zip] [--prefix] [-o] [rev] [paths]` | `veyra archive` | ✅ (tar with the commit id in the pax header, so `git get-tar-commit-id` works) |
+| `git bundle create/verify/list-heads/unbundle` | `veyra bundle …` | ✅ (v2 bundles that `git clone` and `git bundle verify` accept; ranges become prerequisites) |
 
 Full Git compatibility will be claimed only when a published conformance matrix, backed by
 automated tests, supports it.

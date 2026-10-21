@@ -3,6 +3,7 @@
 mod ai;
 mod analysis;
 mod branch;
+mod gitx;
 mod history;
 mod remote;
 mod repo;
@@ -91,6 +92,26 @@ pub fn run(ctx: &Ctx, command: Command) -> Result<()> {
         HashObject { write, files } => tools::hash_object(ctx, write, files),
         LsFiles { stage } => tools::ls_files(ctx, stage),
         ShowRef => tools::show_ref(ctx),
+        LsRemote { remote, heads, tags } => gitx::ls_remote(ctx, remote, heads, tags),
+        WriteTree => gitx::write_tree(ctx),
+        CommitTree { tree, parent, message } => gitx::commit_tree(ctx, &tree, &parent, &message),
+        UpdateRef { delete, name, new, old, message } => gitx::update_ref(ctx, delete, &name, new, old, message),
+        ForEachRef { patterns, format } => gitx::for_each_ref(ctx, &patterns, format),
+        MergeBase { a, b, is_ancestor } => gitx::merge_base(ctx, &a, &b, is_ancestor),
+        PackObjects { .. } => gitx::pack_objects(ctx),
+        Shortlog { range, summary, numbered, email } => gitx::shortlog(ctx, range, summary, numbered, email),
+        Describe { revision, tags, long, always, dirty } => gitx::describe(ctx, revision, tags, long, always, dirty),
+        Grep(args) => gitx::grep(ctx, args),
+        Bisect { command } => gitx::bisect(ctx, command),
+        Release { command } => gitx::release(ctx, command),
+        Notes { command, r#ref } => gitx::notes(ctx, command, r#ref),
+        FormatPatch { range, output_directory, stdout } => gitx::format_patch(ctx, &range, output_directory, stdout),
+        Apply { patches, cached, index, check, reverse } => gitx::apply(ctx, &patches, cached, index, check, reverse),
+        Am { mailboxes } => gitx::am(ctx, &mailboxes),
+        Archive { revision, paths, format, prefix, output } => {
+            gitx::archive(ctx, revision, &paths, format, prefix, output)
+        }
+        Bundle { command } => gitx::bundle(ctx, command),
     }
 }
 

@@ -341,6 +341,111 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<AiCommand>,
     },
+    /// Summarize history by author (`git shortlog`).
+    Shortlog {
+        /// Revision or range (default: HEAD).
+        range: Option<String>,
+        /// Only counts.
+        #[arg(short = 's', long)]
+        summary: bool,
+        /// Sort by number of commits.
+        #[arg(short = 'n', long)]
+        numbered: bool,
+        /// Show email addresses.
+        #[arg(short = 'e', long)]
+        email: bool,
+    },
+    /// Name a commit after the nearest tag (`git describe`).
+    Describe {
+        revision: Option<String>,
+        /// Also use lightweight tags.
+        #[arg(long)]
+        tags: bool,
+        /// Always use the long format.
+        #[arg(long)]
+        long: bool,
+        /// Show the abbreviated id when no tag is found.
+        #[arg(long)]
+        always: bool,
+        /// Append `-dirty` if the working tree has changes.
+        #[arg(long)]
+        dirty: bool,
+    },
+    /// Search tracked files (`git grep`).
+    Grep(GrepArgs),
+    /// Find the commit that introduced a problem by binary search (`git bisect`).
+    Bisect {
+        #[command(subcommand)]
+        command: BisectCommand,
+    },
+    /// Release notes, preflight checks and tagging, and verification of released tags.
+    Release {
+        #[command(subcommand)]
+        command: ReleaseCommand,
+    },
+    /// Attach notes to commits without changing them (`git notes`).
+    Notes {
+        #[command(subcommand)]
+        command: Option<NotesCommand>,
+        /// Notes ref (default refs/notes/commits).
+        #[arg(long, global = true, value_name = "REF")]
+        r#ref: Option<String>,
+    },
+    /// Export commits as patch files in mbox format (`git format-patch`).
+    FormatPatch {
+        /// `A..B`, a base revision (commits since it), or `-N` style count with --count.
+        range: String,
+        /// Write the patches into this directory (default: current directory).
+        #[arg(short = 'o', long)]
+        output_directory: Option<std::path::PathBuf>,
+        /// Print to stdout instead of writing files.
+        #[arg(long)]
+        stdout: bool,
+    },
+    /// Apply a patch to the working tree and/or index (`git apply`).
+    Apply {
+        /// Patch files (`-` for stdin).
+        #[arg(required = true)]
+        patches: Vec<String>,
+        /// Apply to the index only.
+        #[arg(long, conflicts_with = "index")]
+        cached: bool,
+        /// Apply to both the index and the working tree.
+        #[arg(long)]
+        index: bool,
+        /// Only check that it applies.
+        #[arg(long)]
+        check: bool,
+        /// Undo the patch.
+        #[arg(short = 'R', long)]
+        reverse: bool,
+    },
+    /// Apply mailed patches (format-patch output) as commits (`git am`).
+    Am {
+        /// mbox files (`-` for stdin).
+        #[arg(required = true)]
+        mailboxes: Vec<String>,
+    },
+    /// Write a commit's tree as tar, tar.gz or zip (`git archive`).
+    Archive {
+        /// Commit, branch or tag (default: HEAD).
+        revision: Option<String>,
+        /// Only these paths.
+        paths: Vec<String>,
+        /// tar, tgz or zip (default: from --output, else tar).
+        #[arg(long)]
+        format: Option<String>,
+        /// Prefix every path, e.g. `project-1.0/`.
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(short = 'o', long)]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Move history as a single file (`git bundle`).
+    Bundle {
+        #[command(subcommand)]
+        command: BundleCommand,
+    },
     /// Check repository health.
     Doctor,
     /// What a change can affect: dependents, tests to run, co-changed files and risk, with evidence.
@@ -384,6 +489,175 @@ pub enum Command {
     },
     #[command(hide = true, name = "show-ref")]
     ShowRef,
+    #[command(hide = true, name = "ls-remote")]
+    LsRemote {
+        remote: Option<String>,
+        #[arg(long)]
+        heads: bool,
+        #[arg(long)]
+        tags: bool,
+    },
+    /// Write the index as a tree and print its id.
+    #[command(hide = true, name = "write-tree")]
+    WriteTree,
+    /// Create a commit object from a tree.
+    #[command(hide = true, name = "commit-tree")]
+    CommitTree {
+        tree: String,
+        #[arg(short = 'p')]
+        parent: Vec<String>,
+        #[arg(short = 'm', required = true)]
+        message: Vec<String>,
+    },
+    /// Set (or with -d delete) a ref, optionally only if it currently has OLD.
+    #[command(hide = true, name = "update-ref")]
+    UpdateRef {
+        #[arg(short = 'd')]
+        delete: bool,
+        name: String,
+        new: Option<String>,
+        old: Option<String>,
+        #[arg(short = 'm')]
+        message: Option<String>,
+    },
+    /// List refs with a format: %(refname), %(refname:short), %(objectname), %(objectname:short), %(objecttype), %(subject).
+    #[command(hide = true, name = "for-each-ref")]
+    ForEachRef {
+        patterns: Vec<String>,
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// Best common ancestor of two commits.
+    #[command(hide = true, name = "merge-base")]
+    MergeBase {
+        a: String,
+        b: String,
+        /// Exit 0 if A is an ancestor of B, 1 otherwise.
+        #[arg(long)]
+        is_ancestor: bool,
+    },
+    /// Write a pack of the objects listed on stdin (one id per line) to stdout.
+    #[command(hide = true, name = "pack-objects")]
+    PackObjects {
+        #[arg(long, required = true)]
+        stdout: bool,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct GrepArgs {
+    pub pattern: String,
+    /// Search this revision instead of the working tree.
+    pub revision: Option<String>,
+    #[arg(short = 'i', long)]
+    pub ignore_case: bool,
+    #[arg(short = 'w', long)]
+    pub word_regexp: bool,
+    /// Treat the pattern as a literal string.
+    #[arg(short = 'F', long)]
+    pub fixed_strings: bool,
+    #[arg(short = 'n', long)]
+    pub line_number: bool,
+    /// Only print file names.
+    #[arg(short = 'l', long)]
+    pub files_with_matches: bool,
+    /// Count matches per file.
+    #[arg(short = 'c', long)]
+    pub count: bool,
+    /// Search the staged versions.
+    #[arg(long)]
+    pub cached: bool,
+    #[arg(last = true)]
+    pub paths: Vec<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BisectCommand {
+    /// Start; optionally give the bad and good commits right away.
+    Start { bad: Option<String>, good: Vec<String> },
+    /// The current (or given) commit has the problem.
+    #[command(alias = "new")]
+    Bad { revision: Option<String> },
+    /// The current (or given) commits don't have the problem.
+    #[command(alias = "old")]
+    Good { revisions: Vec<String> },
+    /// The current (or given) commit can't be tested.
+    Skip { revision: Option<String> },
+    /// Run a command at each step: exit 0 = good, 125 = skip, 1–127 = bad.
+    Run {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Show the marks so far.
+    Log,
+    /// Stop and go back to where you started.
+    Reset,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ReleaseCommand {
+    /// Release notes from Conventional Commits (default: since the last tag).
+    Notes {
+        /// `A..B`, or a base revision.
+        range: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Check that HEAD is ready to release as VERSION, then create the annotated tag.
+    Prepare {
+        version: String,
+        /// Only run the checks.
+        #[arg(long)]
+        dry_run: bool,
+        /// Sign the tag.
+        #[arg(short = 's', long)]
+        sign: bool,
+        /// Tag even if a blocking check fails.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Verify a released tag: its signature, the commits it ships, and attestations.
+    Verify { tag: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum NotesCommand {
+    /// List notes (`<note blob> <commit>`).
+    List,
+    /// Show the note of a commit (default HEAD).
+    Show { revision: Option<String> },
+    /// Add a note (replacing an existing one with -f).
+    Add {
+        #[arg(short = 'm', required = true)]
+        message: Vec<String>,
+        revision: Option<String>,
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
+    /// Append to a commit's note.
+    Append {
+        #[arg(short = 'm', required = true)]
+        message: Vec<String>,
+        revision: Option<String>,
+    },
+    /// Remove a commit's note.
+    Remove { revision: Option<String> },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BundleCommand {
+    /// Bundle refs (default: all branches and tags), excluding what `--exclude`/`A..` reaches.
+    Create {
+        file: std::path::PathBuf,
+        /// Refs or ranges: `main`, `--all` style is the default; `v1.0..main` excludes v1.0's history.
+        revs: Vec<String>,
+    },
+    /// Check a bundle and that this repository has its prerequisites.
+    Verify { file: std::path::PathBuf },
+    /// List the refs in a bundle.
+    ListHeads { file: std::path::PathBuf },
+    /// Store a bundle's objects here and print its refs (then e.g. `veyra branch create x <id>`).
+    Unbundle { file: std::path::PathBuf },
 }
 
 #[derive(Args, Debug)]
@@ -729,6 +1003,17 @@ pub enum RemoteCommand {
     List {
         #[arg(short, long)]
         verbose: bool,
+    },
+    /// The refs a remote has (`git ls-remote`).
+    Refs {
+        /// A remote name or URL (default: origin).
+        remote: Option<String>,
+        /// Only refs under refs/heads.
+        #[arg(long)]
+        heads: bool,
+        /// Only refs under refs/tags.
+        #[arg(long)]
+        tags: bool,
     },
 }
 

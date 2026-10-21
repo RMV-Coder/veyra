@@ -18,6 +18,7 @@ veyra-security.workspace = true
 veyra-intent.workspace = true
 veyra-ai.workspace = true
 veyra-analyze.workspace = true
+regex.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

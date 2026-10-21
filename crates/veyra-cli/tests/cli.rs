@@ -1818,3 +1818,231 @@ fn veyra_and_git_running_at_the_same_time_stay_consistent() {
     env.ok(&["redo"]);
     assert_eq!(env.git(&["rev-list", "--count", "HEAD"]).trim(), "9");
 }
+
+/// Three commits on main, an annotated tag on the first and a lightweight one on the second.
+fn tagged_history(env: &Env) {
+    env.commit_file("a.txt", "one\ntwo\nthree\n", "feat: first");
+    env.git(&["tag", "-a", "v1.0.0", "-m", "release 1"]);
+    env.commit_file("b.txt", "b\n", "fix(core): second");
+    env.git(&["tag", "light"]);
+    env.commit_file("a.txt", "one\nTWO\nthree\n", "docs: third");
+}
+
+#[test]
+fn describe_shortlog_and_grep_agree_with_git() {
+    require_git!();
+    let env = Env::new();
+    tagged_history(&env);
+    assert_eq!(env.ok(&["describe"]), env.git(&["describe"]));
+    assert_eq!(env.ok(&["describe", "--tags"]), env.git(&["describe", "--tags"]));
+    assert_eq!(env.ok(&["describe", "HEAD~2"]), env.git(&["describe", "HEAD~2"]));
+    assert_eq!(env.ok(&["describe", "--long", "HEAD~2"]), env.git(&["describe", "--long", "HEAD~2"]));
+    assert_eq!(env.ok(&["shortlog", "-s"]).trim(), env.git(&["shortlog", "-s", "HEAD"]).trim());
+
+    assert_eq!(env.ok(&["grep", "-n", "TWO"]), "a.txt:2:TWO\n");
+    assert_eq!(env.ok(&["grep", "-i", "-l", "two"]), env.git(&["grep", "-i", "-l", "two"]));
+    assert_eq!(env.ok(&["grep", "-c", "o"]), env.git(&["grep", "-c", "o"]));
+    assert_eq!(env.ok(&["grep", "two", "v1.0.0"]).trim(), "v1.0.0:a.txt:two");
+    env.veyra(&["grep", "nothing-matches-this"]).assert().failure();
+}
+
+#[test]
+fn bisect_run_finds_the_first_bad_commit() {
+    require_git!();
+    let env = Env::new();
+    for i in 0..10 {
+        let content = if i >= 6 { format!("broken {i}\n") } else { format!("fine {i}\n") };
+        env.commit_file("state.txt", &content, &format!("c{i}"));
+    }
+    env.ok(&["bisect", "start", "HEAD", "HEAD~9"]);
+    let out = env.ok(&["bisect", "run", "grep", "-q", "fine", "state.txt"]);
+    assert!(out.contains("is the first bad commit") && out.contains("c6"), "{out}");
+    env.ok(&["bisect", "reset"]);
+    assert_eq!(env.git(&["rev-parse", "--abbrev-ref", "HEAD"]).trim(), "main");
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn format_patch_and_am_interoperate_with_git() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "one\ntwo\nthree\n", "base");
+    env.commit_file("a.txt", "one\nTWO\nthree\n", "change two\n\nWith a body.");
+    env.commit_file("new.txt", "hello", "add new file");
+    env.ok(&["format-patch", "HEAD~2", "-o", "out"]);
+    let files: Vec<_> = std::fs::read_dir(env.repo.join("out")).unwrap().map(|e| e.unwrap().path()).collect();
+    assert_eq!(files.len(), 2, "{files:?}");
+
+    // Git applies Veyra's patches…
+    let other = env.home.join("other");
+    git_in(&env, &env.home, &["clone", "-q", env.repo.to_str().unwrap(), other.to_str().unwrap()]);
+    git_in(&env, &other, &["reset", "-q", "--hard", "HEAD~2"]);
+    let mut am = vec!["am", "-q"];
+    let paths: Vec<String> = files.iter().map(|f| f.to_string_lossy().into_owned()).collect();
+    am.extend(paths.iter().map(String::as_str));
+    git_in(&env, &other, &am);
+    assert_eq!(git_in(&env, &other, &["log", "--format=%s|%b", "-1", "HEAD~1"]).trim(), "change two|With a body.");
+    assert_eq!(std::fs::read_to_string(other.join("new.txt")).unwrap(), "hello");
+
+    // …and Veyra applies Git's.
+    let git_patches = git_in(&env, &other, &["format-patch", "--stdout", "HEAD~2"]);
+    std::fs::write(env.home.join("git.mbox"), git_patches).unwrap();
+    env.ok(&["reset", "--hard", "HEAD~2", "--yes"]);
+    std::fs::remove_dir_all(env.repo.join("out")).unwrap();
+    let out = env.ok(&["am", env.home.join("git.mbox").to_str().unwrap()]);
+    assert!(out.contains("Applied") && out.contains("add new file"), "{out}");
+    assert_eq!(env.git(&["log", "--format=%an|%s", "-2"]), "Test User|add new file\nTest User|change two\n");
+    assert_eq!(env.read("new.txt").as_deref(), Some("hello"));
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn apply_takes_git_diffs_and_can_reverse_them() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "one\ntwo\nthree\n", "base");
+    env.write("a.txt", "zero\none\nTWO\nthree\n");
+    env.write("b.txt", "new\n");
+    env.git(&["add", "-N", "b.txt"]);
+    let diff = env.git(&["diff"]);
+    std::fs::write(env.home.join("p.diff"), &diff).unwrap();
+    env.git(&["checkout", "--", "a.txt"]);
+    env.git(&["rm", "-q", "--cached", "b.txt"]);
+    std::fs::remove_file(env.repo.join("b.txt")).unwrap();
+
+    let p = env.home.join("p.diff");
+    env.ok(&["apply", "--check", p.to_str().unwrap()]);
+    env.ok(&["apply", "--index", p.to_str().unwrap()]);
+    assert_eq!(env.read("a.txt").as_deref(), Some("zero\none\nTWO\nthree\n"));
+    assert_eq!(env.git(&["status", "--porcelain"]), "M  a.txt\nA  b.txt\n");
+    env.ok(&["apply", "--index", "-R", p.to_str().unwrap()]);
+    assert_eq!(env.git(&["status", "--porcelain"]), "");
+    // A patch whose context doesn't match is refused, with nothing written.
+    env.commit_file("a.txt", "something else\n", "diverge");
+    env.veyra(&["apply", p.to_str().unwrap()]).assert().failure();
+    assert_eq!(env.read("a.txt").as_deref(), Some("something else\n"));
+}
+
+#[test]
+fn archives_list_the_same_files_as_git_archive() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("src/main.rs", "fn main() {}\n", "a");
+    env.commit_file("README.md", "# x\n", "b");
+    let tar = env.home.join("v.tar");
+    env.ok(&["archive", "-o", tar.to_str().unwrap(), "--prefix", "proj"]);
+    let mut cmd = Command::new("tar");
+    let listing = cmd.arg("-tf").arg(env.home.join("v.tar")).output().expect("tar is installed");
+    let mut ours: Vec<String> = String::from_utf8_lossy(&listing.stdout).lines().map(str::to_owned).collect();
+    ours.sort();
+    assert_eq!(ours, vec!["proj/README.md", "proj/src/main.rs"]);
+    // Git reads the commit id from the pax header, like with `git archive`.
+    let mut get = Command::new("git");
+    env.apply(&mut get);
+    let out =
+        get.arg("get-tar-commit-id").stdin(std::fs::File::open(env.home.join("v.tar")).unwrap()).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), env.git(&["rev-parse", "HEAD"]).trim());
+
+    env.ok(&["archive", "-o", env.home.join("v.tgz").to_str().unwrap()]);
+    let listing = Command::new("tar").arg("-tzf").arg(env.home.join("v.tgz")).output().unwrap();
+    assert!(listing.status.success(), "{}", String::from_utf8_lossy(&listing.stderr));
+    assert!(String::from_utf8_lossy(&listing.stdout).contains("src/main.rs"));
+    env.ok(&["archive", "--format", "zip", "-o", env.home.join("v.zip").to_str().unwrap()]);
+    assert!(std::fs::read(env.home.join("v.zip")).unwrap().starts_with(b"PK\x03\x04"));
+}
+
+#[test]
+fn bundles_round_trip_through_git() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "1\n", "one");
+    env.ok(&["tag", "-a", "v1", "-m", "v1"]);
+    env.commit_file("a.txt", "2\n", "two");
+    let full = env.home.join("full.bundle");
+    env.ok(&["bundle", "create", full.to_str().unwrap()]);
+    git_in(&env, &env.repo, &["bundle", "verify", full.to_str().unwrap()]);
+    let clone = env.home.join("from-bundle");
+    git_in(&env, &env.home, &["clone", "-q", full.to_str().unwrap(), clone.to_str().unwrap()]);
+    assert_eq!(git_in(&env, &clone, &["log", "--format=%s"]), "two\none\n");
+
+    // Incremental bundle with a prerequisite, unbundled by Veyra into the clone's history.
+    env.commit_file("a.txt", "3\n", "three");
+    let inc = env.home.join("inc.bundle");
+    let out = env.ok(&["bundle", "create", inc.to_str().unwrap(), "v1..main"]);
+    assert!(out.contains("prerequisite"), "{out}");
+    let heads = env.ok(&["bundle", "list-heads", inc.to_str().unwrap()]);
+    assert!(heads.contains("refs/heads/main"), "{heads}");
+    let mut cmd = env.veyra(&["bundle", "unbundle", inc.to_str().unwrap()]);
+    let out = cmd.current_dir(&clone).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let head = env.git(&["rev-parse", "HEAD"]);
+    assert_eq!(git_in(&env, &clone, &["cat-file", "-t", head.trim()]).trim(), "commit");
+    git_in(&env, &clone, &["fsck", "--no-dangling"]);
+}
+
+#[test]
+fn notes_ls_remote_and_plumbing_match_git() {
+    require_git!();
+    let env = Env::new();
+    let bare = bare_origin(&env);
+    tagged_history(&env);
+    env.ok(&["push", "-u", "origin", "main", "--tags"]);
+
+    env.ok(&["notes", "add", "-m", "reviewed by A"]);
+    assert_eq!(env.git(&["notes", "show"]), "reviewed by A\n");
+    env.ok(&["notes", "append", "-m", "and B"]);
+    assert_eq!(env.git(&["notes", "show"]), "reviewed by A\n\nand B\n");
+    env.ok(&["notes", "remove"]);
+    assert!(env.veyra(&["notes", "show"]).output().unwrap().stdout.is_empty());
+
+    let ours = env.ok(&["remote", "refs", "origin"]);
+    let theirs = git_in(&env, &env.repo, &["ls-remote", bare.to_str().unwrap()]);
+    let sorted = |s: &str| {
+        let mut v: Vec<String> = s.lines().map(str::to_owned).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(sorted(&ours), sorted(&theirs));
+
+    assert_eq!(env.ok(&["write-tree"]), env.git(&["write-tree"]));
+    assert_eq!(env.ok(&["merge-base", "HEAD", "HEAD~2"]), env.git(&["merge-base", "HEAD", "HEAD~2"]));
+    env.ok(&["merge-base", "--is-ancestor", "HEAD~2", "HEAD"]);
+    env.veyra(&["merge-base", "--is-ancestor", "HEAD", "HEAD~2"]).assert().failure();
+    let fmt = "%(refname:short) %(objecttype) %(subject)";
+    assert_eq!(
+        env.ok(&["for-each-ref", "--format", fmt, "refs/tags/"]),
+        env.git(&["for-each-ref", "--format", fmt, "refs/tags/"])
+    );
+    let tree = env.git(&["rev-parse", "HEAD^{tree}"]);
+    let made = env.ok(&["commit-tree", tree.trim(), "-p", "HEAD", "-m", "plumbing"]);
+    assert_eq!(env.git(&["cat-file", "-t", made.trim()]).trim(), "commit");
+    env.ok(&["update-ref", "refs/heads/plumbed", made.trim()]);
+    assert_eq!(env.git(&["log", "-1", "--format=%s", "plumbed"]).trim(), "plumbing");
+    env.ok(&["undo"]);
+    assert!(env.git(&["branch", "--list", "plumbed"]).is_empty(), "update-ref is undoable");
+    env.assert_git_clean_and_valid();
+}
+
+#[test]
+fn release_notes_prepare_and_verify() {
+    require_git!();
+    let env = Env::new();
+    tagged_history(&env);
+    env.commit_file("c.txt", "c\n", "feat!: new api");
+    let notes = env.ok(&["release", "notes"]);
+    assert!(notes.contains("### ⚠ Breaking changes") && notes.contains("new api"), "{notes}");
+    assert!(notes.contains("### Bug fixes") && notes.contains("**core:** second"), "{notes}");
+    assert!(!notes.contains("first"), "only changes since v1.0.0: {notes}");
+
+    env.write("dirty.txt", "x");
+    env.ok(&["add", "dirty.txt"]);
+    let out = env.veyra(&["release", "prepare", "v2.0.0"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("FAIL  clean working tree"));
+    env.ok(&["commit", "-m", "chore: dirty"]);
+    let out = env.ok(&["release", "prepare", "v2.0.0"]);
+    assert!(out.contains("Tagged v2.0.0"), "{out}");
+    assert!(env.git(&["tag", "-n20", "v2.0.0"]).contains("new api"));
+    let v = env.ok(&["release", "verify", "v2.0.0"]);
+    assert!(v.contains("not signed") && v.contains("Commits in this release: 4"), "{v}");
+}

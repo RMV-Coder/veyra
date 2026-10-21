@@ -3,6 +3,14 @@
 All notable changes are listed here. Veyra follows [semantic versioning](https://semver.org/);
 see [docs/STABILITY.md](docs/STABILITY.md) for what 1.x keeps stable.
 
+## 1.1.0
+
+Git parity for the remaining commands, each checked against Git in the end-to-end tests:
+`shortlog`, `describe`, `grep`, `bisect` (with `run`), `format-patch`, `apply`, `am`, `notes`,
+`archive` (tar, tar.gz, zip), `bundle`, `remote refs` / `ls-remote`, and the plumbing commands
+`write-tree`, `commit-tree`, `update-ref`, `for-each-ref`, `merge-base`, `pack-objects`.
+New: `veyra release notes / prepare / verify`.
+
 ## 1.0.0
 
 Hardening and the 1.0 promise.

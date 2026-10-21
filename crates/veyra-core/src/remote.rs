@@ -7,9 +7,13 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result, anyhow, bail};
+use gix::ObjectId;
 use gix::bstr::ByteSlice;
 
 use crate::Repo;
+
+/// A remote ref: `(name, id, peeled id when it's an annotated tag)`; no id when unborn.
+pub type RemoteRef = (String, Option<ObjectId>, Option<ObjectId>);
 use crate::config;
 
 /// A configured remote.
@@ -100,6 +104,40 @@ impl Repo {
             }
         }
         Ok(summary)
+    }
+
+    /// The refs a remote advertises (`git ls-remote`): `(name, id, peeled id of a tag)`.
+    /// `remote` is a configured remote's name or a URL.
+    pub fn remote_refs(&self, remote: &str) -> Result<Vec<RemoteRef>> {
+        let handle = match self.git.find_remote(remote) {
+            Ok(r) => r,
+            Err(_) => {
+                self.git.remote_at(remote).map_err(|e| anyhow!("'{remote}' is neither a remote nor a URL: {e}"))?
+            }
+        };
+        let connection = handle
+            .connect(gix::remote::Direction::Fetch)
+            .with_context(|| format!("could not connect to '{remote}'"))?;
+        let options =
+            gix::remote::ref_map::Options { prefix_from_spec_as_filter_on_remote: false, ..Default::default() };
+        let (map, _) = connection
+            .ref_map(gix::progress::Discard, options)
+            .with_context(|| format!("could not list the refs of '{remote}'"))?;
+        use gix::protocol::handshake::Ref;
+        let mut out: Vec<RemoteRef> = map
+            .remote_refs
+            .iter()
+            .map(|r| match r {
+                Ref::Peeled { full_ref_name, tag, object } => (full_ref_name.to_string(), Some(*tag), Some(*object)),
+                Ref::Direct { full_ref_name, object } => (full_ref_name.to_string(), Some(*object), None),
+                Ref::Symbolic { full_ref_name, tag, object, .. } => {
+                    (full_ref_name.to_string(), Some(tag.unwrap_or(*object)), tag.map(|_| *object))
+                }
+                Ref::Unborn { full_ref_name, .. } => (full_ref_name.to_string(), None, None),
+            })
+            .collect();
+        out.sort_by(|a, b| (a.0 != "HEAD", &a.0).cmp(&(b.0 != "HEAD", &b.0)));
+        Ok(out)
     }
 
     /// Clone `url` into `path` without checking anything out (no index, empty worktree).

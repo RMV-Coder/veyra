@@ -26,6 +26,7 @@ pub fn remote(ctx: &Ctx, args: RemoteArgs) -> Result<()> {
             anstream::println!("Removed remote '{name}'");
         }
         Some(RemoteCommand::List { verbose }) => list(ctx, &repo, verbose)?,
+        Some(RemoteCommand::Refs { remote, heads, tags }) => return super::gitx::ls_remote(ctx, remote, heads, tags),
         None => list(ctx, &repo, args.verbose)?,
     }
     Ok(())

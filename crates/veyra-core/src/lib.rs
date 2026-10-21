@@ -10,23 +10,29 @@
 //! same comparison and application logic.
 
 pub mod annotate;
+pub mod archive;
 pub mod attest;
+pub mod bundle;
 pub mod checkout;
 pub mod commit;
 pub mod config;
 pub mod delta;
 pub mod diff;
 pub mod flat;
+pub mod history;
 pub mod hooks;
 pub mod impact;
 pub mod index;
 pub mod maintenance;
 pub mod merge;
+pub mod notes;
 pub mod objects;
 pub mod patch;
+pub mod patches;
 pub mod pick;
 pub mod push;
 pub mod refs;
+pub mod release;
 pub mod remote;
 pub mod repo;
 pub mod rerere;
