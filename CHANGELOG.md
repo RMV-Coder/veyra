@@ -3,7 +3,7 @@
 All notable changes are listed here. Veyra follows [semantic versioning](https://semver.org/);
 see [docs/STABILITY.md](docs/STABILITY.md) for what 1.x keeps stable.
 
-## Unreleased
+## 1.3.2
 
 - **Fixed:** `veyra attest run -- <words>` joined its words with spaces and handed them to `sh -c`,
   so a word containing a space or a backslash (any path under `C:\Program Files`) was split and
