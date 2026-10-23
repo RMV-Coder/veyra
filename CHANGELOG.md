@@ -3,6 +3,18 @@
 All notable changes are listed here. Veyra follows [semantic versioning](https://semver.org/);
 see [docs/STABILITY.md](docs/STABILITY.md) for what 1.x keeps stable.
 
+## Unreleased
+
+- **Fixed:** `veyra attest run -- <words>` joined its words with spaces and handed them to `sh -c`,
+  so a word containing a space or a backslash (any path under `C:\Program Files`) was split and
+  unescaped, and the run was recorded as a failed test. Several words are now quoted, one word is
+  still a shell line (`"npm test && npm run lint"`), the original argv is recorded as `argv`, and
+  a command that can't be started (exit 126/127) is reported instead of attested as a failure.
+- `veyra discard` points at `veyra restore --staged --worktree` when the paths have staged changes,
+  and `veyra undo` of a commit says that its changes were left staged.
+- A leading UTF-8 byte-order mark is dropped from commit messages (`commit -F` with a file written
+  by Windows PowerShell 5.1).
+
 ## 1.3.1
 
 The first release with downloadable binaries, and the first whose test suite has passed on Linux

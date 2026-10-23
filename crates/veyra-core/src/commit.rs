@@ -47,6 +47,9 @@ impl CommitInfo {
 
 /// Normalise a message like `git commit --cleanup=whitespace` (or `strip` when `strip_comments`).
 pub fn clean_message(message: &str, strip_comments: bool) -> String {
+    // A UTF-8 byte-order mark (Windows PowerShell 5.1's `Set-Content -Encoding utf8` writes one)
+    // would otherwise become the first character of the subject.
+    let message = message.strip_prefix('\u{feff}').unwrap_or(message);
     let mut lines: Vec<&str> =
         message.lines().filter(|l| !(strip_comments && l.starts_with('#'))).map(str::trim_end).collect();
     // Collapse runs of blank lines and trim leading/trailing blank lines.

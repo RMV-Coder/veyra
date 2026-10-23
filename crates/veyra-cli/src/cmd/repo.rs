@@ -311,6 +311,21 @@ pub fn restore(ctx: &Ctx, args: RestoreArgs) -> Result<()> {
     })?;
     if changed.is_empty() {
         anstream::println!("nothing to restore");
+        // The worktree already matches the index, but the index may hold changes (e.g. after
+        // `veyra undo` of a commit, which leaves its changes staged).
+        if !args.staged && source_tree.is_none() {
+            let staged = veyra_core::flat::diff(&repo.flat_head()?, &repo.flat_index()?)
+                .into_iter()
+                .filter(|c| spec.matches(c.path.as_ref()))
+                .count();
+            if staged > 0 {
+                ui::hint(&format!(
+                    "{} staged changes; `veyra restore --staged --worktree {}` discards those too",
+                    if staged == 1 { "1 path has".to_owned() } else { format!("{staged} paths have") },
+                    args.paths.join(" ")
+                ));
+            }
+        }
     } else {
         for p in &changed {
             anstream::println!("{} {p}", if args.staged && !args.worktree { "unstaged" } else { "restored" });

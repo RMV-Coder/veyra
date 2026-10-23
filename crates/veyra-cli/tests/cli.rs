@@ -2892,3 +2892,55 @@ fn analyzer_plugins_run_only_once_trusted() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("plugin todo-check failed (exit code 3)"));
 }
+
+#[test]
+fn attest_run_keeps_argument_boundaries() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "a\n", "c1");
+    // A script in a directory with a space, given an argument with a space and a backslash.
+    env.write("my tools/check.sh", "printf '%s|%s' \"$1\" \"$2\" > .git/attest-args\n");
+    env.ok(&["attest", "run", "--", "sh", "my tools/check.sh", r"C:\Program Files\x", "it's"]);
+    assert_eq!(std::fs::read_to_string(env.repo.join(".git/attest-args")).unwrap(), r"C:\Program Files\x|it's");
+    let list: serde_json::Value = serde_json::from_str(&env.ok(&["attest", "list", "--json"])).unwrap();
+    let predicate = &list["attestations"][0]["statement"]["predicate"];
+    assert_eq!(predicate["success"], true, "{predicate}");
+    assert_eq!(predicate["argv"][2], r"C:\Program Files\x");
+
+    // One word is still a shell line.
+    env.ok(&["attest", "run", "--", "true && exit 0"]);
+    // A command that can't start isn't recorded as a failed test.
+    env.veyra(&["attest", "run", "--", "definitely-not-a-command-xyz", "--version"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("could not be started").and(predicate::str::contains("nothing was attested")));
+    let list: serde_json::Value = serde_json::from_str(&env.ok(&["attest", "list", "--json"])).unwrap();
+    assert_eq!(list["attestations"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn discard_points_to_staged_changes_and_commit_messages_drop_a_bom() {
+    require_git!();
+    let env = Env::new();
+    env.commit_file("a.txt", "a\n", "c1");
+    env.write("a.txt", "changed\n");
+    env.ok(&["add", "a.txt"]);
+    // -F with a UTF-8 BOM (Windows PowerShell 5.1's `Set-Content -Encoding utf8`).
+    std::fs::write(env.home.join("msg.txt"), "\u{feff}feat: change a\n").unwrap();
+    env.ok(&["commit", "-F", env.home.join("msg.txt").to_str().unwrap()]);
+    assert_eq!(env.git(&["log", "-1", "--format=%s"]), "feat: change a\n");
+
+    // Undoing the commit leaves its changes staged, and says so.
+    let out = env.veyra(&["undo"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("still staged"), "{}", String::from_utf8_lossy(&out.stderr));
+    // discard finds nothing in the worktree, and points at the staged change.
+    let out = env.veyra(&["discard", "a.txt", "--yes"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("nothing to restore"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("1 path has staged changes") && stderr.contains("veyra restore --staged --worktree a.txt"),
+        "{stderr}"
+    );
+    env.ok(&["restore", "--staged", "--worktree", "a.txt", "--yes"]);
+    assert_eq!(env.read("a.txt").as_deref(), Some("a\n"));
+}

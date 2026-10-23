@@ -74,6 +74,14 @@ pub fn undo(ctx: &Ctx, which: Option<String>, force: bool, dry_run: bool, what: 
         anstream::println!("  (nothing needed to change)");
     }
     if !dry_run {
+        if matches!(target.kind.as_str(), "commit" | "amend")
+            && !veyra_core::flat::diff(&repo.flat_head()?, &repo.flat_index()?).is_empty()
+        {
+            ui::hint(
+                "the commit's changes are still staged: `veyra unstage <paths>` keeps them in your files, \
+                 `veyra restore --staged --worktree <paths>` discards them",
+            );
+        }
         ui::hint("`veyra redo` reapplies it");
     }
     Ok(())

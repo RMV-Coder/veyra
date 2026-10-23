@@ -1478,6 +1478,25 @@ fn show_attestations(ctx: &Ctx, repo: &Repo, commit: ObjectId, check: bool) -> R
     Ok(())
 }
 
+/// The `sh -c` line for `attest run -- <words>`. One word is taken as a shell command line
+/// (`"npm test && npm run lint"`); several words are an argv, so each is quoted to keep spaces and
+/// backslashes (`"C:\Program Files\nodejs\node.exe" --version`).
+fn shell_line(words: &[String]) -> String {
+    match words {
+        [one] => one.clone(),
+        _ => words.iter().map(|w| sh_quote(w)).collect::<Vec<_>>().join(" "),
+    }
+}
+
+/// POSIX single-quoting, left bare when the word has nothing the shell would interpret.
+fn sh_quote(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '+' | ',' | '@'));
+    if plain { word.to_owned() } else { format!("'{}'", word.replace('\'', "'\\''")) }
+}
+
 pub fn attest(ctx: &Ctx, command: crate::cli::AttestCommand) -> Result<()> {
     use crate::cli::AttestCommand;
     use veyra_core::attest::{REVIEW_PREDICATE, TEST_PREDICATE, statement};
@@ -1488,13 +1507,21 @@ pub fn attest(ctx: &Ctx, command: crate::cli::AttestCommand) -> Result<()> {
             let commit = repo.rev_parse_commit(rev.as_deref().unwrap_or("HEAD"))?;
             let at_head = repo.head_commit_id()? == Some(commit);
             let clean = repo.worktree_changes()?.is_clean() && repo.flat_index()? == repo.flat_head()?;
-            let line = command.join(" ");
+            let line = shell_line(&command);
             let started = std::time::Instant::now();
             let mut shell = veyra_core::gix::path::env::shell_command();
             shell.arg("-c").arg(&line).current_dir(repo.workdir()?);
             let status = shell.status().with_context(|| format!("could not run `{line}`"))?;
+            // 127/126: the shell couldn't find or execute the command. That's not a test result.
+            if let Some(code @ (126 | 127)) = status.code() {
+                bail!(
+                    "`{line}` could not be started (exit code {code}: {}); nothing was attested",
+                    if code == 127 { "command not found" } else { "not executable" }
+                );
+            }
             let predicate = json!({
                 "command": line,
+                "argv": command,
                 "exit_code": status.code(),
                 "success": status.success(),
                 "duration_ms": started.elapsed().as_millis() as u64,
